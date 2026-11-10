@@ -311,6 +311,54 @@ def cmd_pull(args):
     os.makedirs(target_dir, exist_ok=True)
     target_file = args[0] if len(args) > 0 else ""
 
+    # Check if user wants to pull current ongoing session
+    st_out, _ = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
+    curr_state = "IDLE"
+    curr_session = ""
+    frames_count = 0
+    if st_out.startswith("{"):
+        try:
+            st = json.loads(st_out)
+            curr_state = st.get("state", "IDLE")
+            curr_session = st.get("session_id", "")
+            frames_count = st.get("frames_captured", 0)
+        except Exception:
+            pass
+
+    # If user ran `tl pull now` or `tl pull current` or if session is actively recording and no specific file passed:
+    if target_file in ["now", "current"] or (curr_state == "RECORDING" and not target_file):
+        if not curr_session or frames_count < 1:
+            print(f"{C_RED}В текущей сессии еще нет снятых кадров.{C_RESET}")
+            return
+
+        print(f"{C_CYAN}Идет съемка прямо сейчас ({frames_count} кадров).{C_RESET}")
+        print(f"Формирую промежуточный ролик из готовых кадров (съемка НЕ прерывается)...")
+
+        adb_cmd("shell", f"am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.ENCODE --ez is_snapshot true --es session_id '{curr_session}'")
+
+        # Wait for snapshot video to appear in /sdcard/Timelapse/videos/
+        print("Кодирую видео на процессоре телефона...")
+        found_snap = None
+        for _ in range(60):
+            time.sleep(1.0)
+            v_out, _ = adb_cmd("shell", f"ls -t /sdcard/Timelapse/videos/*{curr_session}*.mp4 2>/dev/null", timeout=3)
+            lines = [l.strip() for l in v_out.splitlines() if l.strip().endswith(".mp4")]
+            if lines:
+                found_snap = lines[0] # most recent
+                break
+
+        if not found_snap:
+            print(f"{C_RED}Не удалось сформировать промежуточное видео.{C_RESET}")
+            return
+
+        snap_name = os.path.basename(found_snap)
+        print(f"{C_GREEN}Промежуточное видео собрано:{C_RESET} {snap_name}")
+        print(f"Скачиваю на компьютер в {target_dir}...")
+        adb_cmd("pull", found_snap, target_dir)
+        print(f"{C_GREEN}Готово! Файл сохранен: {os.path.join(target_dir, snap_name)}{C_RESET}")
+        print(f"{C_YELLOW}Съемка на телефоне продолжается в штатном режиме без потери кадров.{C_RESET}")
+        return
+
     if target_file and target_file != "all":
         phone_path = f"/sdcard/Timelapse/videos/{target_file}"
         print(f"Скачиваю {target_file} в {target_dir}...")
@@ -368,7 +416,7 @@ def show_help():
   {C_CYAN}tl preview [макс_сек]{C_RESET}              Сделать снимок (по умолчанию до 4.5с, можно передать до 32с: tl preview 15)
   {C_CYAN}tl mode [smart|classic]{C_RESET}           Переключить режим камеры: smart (выдержка) или classic (базовый)
   {C_CYAN}tl videos{C_RESET}                         Список готовых MP4 файлов на телефоне
-  {C_CYAN}tl pull [файл|all]{C_RESET}                Скачать видео с телефона в ~/Videos/Timelapse/
+  {C_CYAN}tl pull [файл|all|now]{C_RESET}            Скачать видео с телефона (tl pull now соберет текущую идущую съемку без остановки)
   {C_CYAN}tl logs{C_RESET}                           Просмотр логов работы камеры в реальном времени
 """)
 

@@ -46,9 +46,11 @@ class CommandReceiver : BroadcastReceiver() {
 
             "com.romchik.timelapse.ENCODE" -> {
                 val sessionId = intent.getStringExtra("session_id")
+                val isSnapshot = intent.getBooleanExtra("is_snapshot", false)
                 val serviceIntent = Intent(context, TimelapseService::class.java).apply {
                     this.action = TimelapseService.ACTION_ENCODE_NOW
                     putExtra(TimelapseService.EXTRA_SESSION_ID, sessionId)
+                    putExtra("is_snapshot", isSnapshot)
                 }
                 ContextCompat.startForegroundService(context, serviceIntent)
             }

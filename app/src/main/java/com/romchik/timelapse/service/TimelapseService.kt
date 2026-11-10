@@ -69,7 +69,8 @@ class TimelapseService : Service() {
             }
             ACTION_ENCODE_NOW -> {
                 val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
-                triggerEncode(sessionId)
+                val isSnapshot = intent.getBooleanExtra("is_snapshot", false)
+                triggerEncode(sessionId, isSnapshot)
             }
         }
 
@@ -268,9 +269,35 @@ class TimelapseService : Service() {
         }
     }
 
-    private fun triggerEncode(targetSessionId: String?) {
+    private fun triggerEncode(targetSessionId: String?, isSnapshot: Boolean = false) {
         val sessionId = targetSessionId ?: currentSessionId ?: return
         val sessionDir = StorageHelper.getSessionDir(sessionId)
+
+        // If this is a live snapshot of an ongoing session, DO NOT stop recording or delete JPEGs!
+        if (isSnapshot || currentState == STATE_RECORDING) {
+            serviceScope.launch(Dispatchers.Default) {
+                val timeTag = java.text.SimpleDateFormat("HH-mm-ss", Locale.US).format(java.util.Date())
+                val outputFile = File(StorageHelper.videosDir, "timelapse_${sessionId}_snap_$timeTag.mp4")
+                Log.i(TAG, "Starting non-destructive snapshot encoding: ${outputFile.name}")
+                VideoEncoder.encodeSession(
+                    context = this@TimelapseService,
+                    sessionDir = sessionDir,
+                    outputVideoFile = outputFile,
+                    width = 1280,
+                    height = 720,
+                    frameRate = 30,
+                    bitRate = 3_000_000,
+                    deleteJpegsAfterSuccess = false, // NEVER delete frames during live snapshot!
+                    onProgress = { current, total ->
+                        if (current % 150 == 0 || current == total) {
+                            Log.i(TAG, "Snapshot encode: $current/$total")
+                        }
+                    }
+                )
+                Log.i(TAG, "Snapshot video created: ${outputFile.name}")
+            }
+            return
+        }
 
         currentState = STATE_ENCODING
         broadcastStatus()
