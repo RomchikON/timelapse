@@ -82,8 +82,8 @@ def ensure_device():
             print("Убедитесь, что телефон подключен к домашнему Wi-Fi.")
             sys.exit(1)
 
-    # Ensure MIUI background permissions are active
-    adb_cmd("shell", "cmd appops set com.romchik.timelapse 10020 allow; cmd appops set com.romchik.timelapse 10021 allow; cmd appops set com.romchik.timelapse 10008 allow", timeout=3)
+    # Ensure MIUI background permissions and storage access are active
+    adb_cmd("shell", "cmd appops set com.romchik.timelapse 10020 allow; cmd appops set com.romchik.timelapse 10021 allow; cmd appops set com.romchik.timelapse 10008 allow; cmd appops set com.romchik.timelapse MANAGE_EXTERNAL_STORAGE allow; cmd appops set com.romchik.timelapse LEGACY_STORAGE allow; cmd deviceidle whitelist +com.romchik.timelapse", timeout=3)
 
 def cmd_status():
     ensure_device()
