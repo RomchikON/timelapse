@@ -2,6 +2,11 @@ package com.romchik.timelapse.encoder
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -9,6 +14,9 @@ import android.media.MediaMuxer
 import android.util.Log
 import com.romchik.timelapse.utils.StorageHelper
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 object VideoEncoder {
     private const val TAG = "VideoEncoder"
@@ -67,12 +75,54 @@ object VideoEncoder {
 
             val decodeOptions = BitmapFactory.Options().apply {
                 inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+                inMutable = true
+            }
+
+            val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+            val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = 24f
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                setShadowLayer(3f, 1f, 1f, Color.argb(180, 0, 0, 0))
+            }
+
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(140, 0, 0, 0)
+                style = Paint.Style.FILL
             }
 
             for (i in frameFiles.indices) {
                 val file = frameFiles[i]
                 val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
                 if (bitmap != null) {
+                    try {
+                        val timeText = dateFormat.format(Date(file.lastModified()))
+                        val textWidth = textPaint.measureText(timeText)
+                        val fontMetrics = textPaint.fontMetrics
+                        val textHeight = fontMetrics.descent - fontMetrics.ascent
+
+                        val padX = 12f
+                        val padY = 6f
+                        val margin = 20f
+                        val bW = bitmap.width.toFloat()
+                        val bH = bitmap.height.toFloat()
+
+                        val bgRect = RectF(
+                            bW - margin - textWidth - padX * 2,
+                            bH - margin - textHeight - padY * 2,
+                            bW - margin,
+                            bH - margin
+                        )
+                        val canvas = Canvas(bitmap)
+                        canvas.drawRoundRect(bgRect, 8f, 8f, bgPaint)
+                        val textX = bgRect.left + padX
+                        val textY = bgRect.bottom - padY - fontMetrics.descent
+                        canvas.drawText(timeText, textX, textY, textPaint)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to draw timestamp overlay on frame ${file.name}", e)
+                    }
+
                     eglHelper.drawBitmap(bitmap, ptsNs)
                     bitmap.recycle()
                 }

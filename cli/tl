@@ -6,9 +6,24 @@ import json
 import subprocess
 import shutil
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "cli" else SCRIPT_DIR
+PREVIEWS_DIR = os.path.join(PROJECT_DIR, "previews")
+
 ADB_BIN = os.path.expanduser("~/.local/platform-tools/adb")
 if not os.path.exists(ADB_BIN):
-    ADB_BIN = shutil.which("adb") or "adb"
+    win_adb = os.path.expanduser("~/platform-tools/adb.exe")
+    if os.path.exists(win_adb):
+        ADB_BIN = win_adb
+    else:
+        ADB_BIN = shutil.which("adb") or "adb"
 
 # Terminal Colors
 C_RESET = "\033[0m"
@@ -22,7 +37,7 @@ C_MAGENTA = "\033[35m"
 
 def get_active_device():
     try:
-        res = subprocess.run([ADB_BIN, "devices"], capture_output=True, text=True, timeout=3)
+        res = subprocess.run([ADB_BIN, "devices"], capture_output=True, encoding="utf-8", errors="replace", timeout=3)
         devices = []
         for line in res.stdout.splitlines()[1:]:
             parts = line.strip().split()
@@ -46,7 +61,7 @@ def adb_cmd(*args, timeout=8):
     global DEVICE_SERIAL
     cmd = [ADB_BIN, "-s", DEVICE_SERIAL] + list(args)
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        res = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
         return res.stdout.strip(), res.returncode
     except subprocess.TimeoutExpired:
         return "", 1
@@ -58,9 +73,10 @@ def ensure_device():
     DEVICE_SERIAL = get_active_device()
     out, code = adb_cmd("get-state", timeout=3)
     if code != 0 or out != "device":
-        adb_cmd("connect", "192.168.31.216:5555", timeout=3)
+        subprocess.run([ADB_BIN, "connect", "192.168.31.216:5555"], capture_output=True, timeout=8)
+        time.sleep(0.5)
         DEVICE_SERIAL = get_active_device()
-        out, code = adb_cmd("get-state", timeout=3)
+        out, code = adb_cmd("get-state", timeout=5)
         if code != 0 or out != "device":
             print(f"{C_RED}Ошибка: Телефон недоступен через ADB ({DEVICE_SERIAL})!{C_RESET}")
             print("Убедитесь, что телефон подключен к домашнему Wi-Fi.")
@@ -236,8 +252,10 @@ def cmd_preview(args):
             pass
 
     cap_msg = f" (макс. выдержка: {custom_max_exp} сек)" if custom_max_exp else " (базовый лимит: 4.5 сек)"
-    timestamp = time.strftime("%H%M%S")
-    tmp_path = f"/tmp/tl_preview_{timestamp}.jpg"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    os.makedirs(PREVIEWS_DIR, exist_ok=True)
+    save_path = os.path.join(PREVIEWS_DIR, f"preview_{timestamp}.jpg")
+    root_preview = os.path.join(PROJECT_DIR, "preview.jpg")
     print(f"{C_CYAN}Делаю свежий снимок с камеры (автозамер + адаптивная выдержка){cap_msg}...{C_RESET}")
 
     # Remove old last_frame.jpg so we know when the new frame is written
@@ -264,10 +282,16 @@ def cmd_preview(args):
         print(f"{C_RED}Таймаут ожидания снимка с камеры.{C_RESET}")
         return
 
-    out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", tmp_path, timeout=6)
-    if code != 0 or not os.path.exists(tmp_path):
+    out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", save_path, timeout=6)
+    if code != 0 or not os.path.exists(save_path):
         print(f"{C_RED}Не удалось скачать снимок с камеры.{C_RESET}")
         return
+
+    # Keep a copy as preview.jpg in root
+    try:
+        shutil.copy2(save_path, root_preview)
+    except Exception:
+        pass
 
     # Read exposure metadata from status.json
     st_out, st_code = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
@@ -283,12 +307,77 @@ def cmd_preview(args):
         except Exception:
             pass
 
-    size_kb = os.path.getsize(tmp_path) / 1024.0
-    print(f"{C_GREEN}Свежий кадр получен:{C_RESET} {tmp_path} ({size_kb:.1f} KB){meta_str}")
-    viewer = shutil.which("xdg-open")
-    if viewer and "DISPLAY" in os.environ:
-        subprocess.Popen([viewer, tmp_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("Открываю просмотр изображения на экране...")
+    size_kb = os.path.getsize(save_path) / 1024.0
+    print(f"{C_GREEN}Свежий кадр получен:{C_RESET} {save_path} ({size_kb:.1f} KB){meta_str}")
+    print(f"Ссылка в корне проекта: {root_preview}")
+
+    if sys.platform == "win32":
+        opened = False
+        file_url = "file:///" + os.path.abspath(root_preview).replace("\\", "/")
+        chrome_candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+        ]
+        for chrome in chrome_candidates:
+            if os.path.exists(chrome):
+                try:
+                    subprocess.Popen([chrome, f"--app={file_url}"])
+                    print("Открываю в окне просмотра Chrome...")
+                    opened = True
+                    break
+                except Exception:
+                    pass
+
+        if not opened:
+            edge_candidates = [
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+            ]
+            for edge in edge_candidates:
+                if os.path.exists(edge):
+                    try:
+                        subprocess.Popen([edge, f"--app={file_url}"])
+                        print("Открываю в окне просмотра Edge...")
+                        opened = True
+                        break
+                    except Exception:
+                        pass
+
+        if not opened:
+            try:
+                os.startfile(root_preview)
+                print("Открываю просмотр изображения на экране...")
+            except Exception:
+                pass
+    else:
+        viewer = shutil.which("xdg-open")
+        if viewer and "DISPLAY" in os.environ:
+            subprocess.Popen([viewer, save_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("Открываю просмотр изображения на экране...")
+
+def cmd_clean(args):
+    ensure_device()
+    target = args[0].lower() if args else "videos"
+
+    st_out, _ = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
+    active_session = ""
+    if st_out.startswith("{"):
+        try:
+            active_session = json.loads(st_out).get("session_id", "")
+        except Exception:
+            pass
+
+    if target in ["videos", "all"]:
+        adb_cmd("shell", "rm -f /sdcard/Timelapse/videos/*.mp4 2>/dev/null")
+        print(f"{C_GREEN}Папка видео на телефоне (/sdcard/Timelapse/videos/) очищена.{C_RESET}")
+
+    if target in ["sessions", "all"]:
+        if active_session:
+            adb_cmd("shell", f"find /sdcard/Timelapse/sessions/ -maxdepth 1 -mindepth 1 ! -name '{active_session}' -exec rm -rf {{}} + 2>/dev/null")
+            print(f"{C_GREEN}Старые неактивные сессии удалены (активная сессия {active_session} сохранена).{C_RESET}")
+        else:
+            adb_cmd("shell", "rm -rf /sdcard/Timelapse/sessions/* 2>/dev/null")
+            print(f"{C_GREEN}Папка сессий (/sdcard/Timelapse/sessions/) очищена.{C_RESET}")
 
 def cmd_videos():
     ensure_device()
@@ -334,6 +423,10 @@ def cmd_pull(args):
         print(f"{C_CYAN}Идет съемка прямо сейчас ({frames_count} кадров).{C_RESET}")
         print(f"Формирую промежуточный ролик из готовых кадров (съемка НЕ прерывается)...")
 
+        # Record existing snap files so we don't accidentally grab an older file
+        existing_out, _ = adb_cmd("shell", f"ls /sdcard/Timelapse/videos/*{curr_session}*_snap_*.mp4 2>/dev/null", timeout=3)
+        existing_snaps = set(existing_out.split())
+
         adb_cmd("shell", f"am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.ENCODE --ez is_snapshot true --es session_id '{curr_session}'")
 
         # Wait for snapshot video to appear in /sdcard/Timelapse/videos/
@@ -341,10 +434,11 @@ def cmd_pull(args):
         found_snap = None
         for _ in range(60):
             time.sleep(1.0)
-            v_out, _ = adb_cmd("shell", f"ls -t /sdcard/Timelapse/videos/*{curr_session}*.mp4 2>/dev/null", timeout=3)
-            lines = [l.strip() for l in v_out.splitlines() if l.strip().endswith(".mp4")]
-            if lines:
-                found_snap = lines[0] # most recent
+            v_out, _ = adb_cmd("shell", f"ls -t /sdcard/Timelapse/videos/*{curr_session}*_snap_*.mp4 2>/dev/null", timeout=3)
+            lines = [l.strip() for l in v_out.splitlines() if l.strip().endswith(".mp4") and not l.strip().endswith(".tmp")]
+            new_snaps = [l for l in lines if l not in existing_snaps]
+            if new_snaps:
+                found_snap = new_snaps[0]
                 break
 
         if not found_snap:
@@ -355,7 +449,9 @@ def cmd_pull(args):
         print(f"{C_GREEN}Промежуточное видео собрано:{C_RESET} {snap_name}")
         print(f"Скачиваю на компьютер в {target_dir}...")
         adb_cmd("pull", found_snap, target_dir)
-        print(f"{C_GREEN}Готово! Файл сохранен: {os.path.join(target_dir, snap_name)}{C_RESET}")
+        local_saved_file = os.path.join(target_dir, snap_name)
+        file_size_mb = os.path.getsize(local_saved_file) / (1024 * 1024) if os.path.exists(local_saved_file) else 0
+        print(f"{C_GREEN}Готово! Файл сохранен: {local_saved_file} ({file_size_mb:.2f} MB){C_RESET}")
         
         # Clean up the temporary snap video on phone so it doesn't take storage
         adb_cmd("shell", f"rm -f '{found_snap}'", timeout=3)
@@ -420,6 +516,7 @@ def show_help():
   {C_CYAN}tl preview [макс_сек]{C_RESET}              Сделать снимок (по умолчанию до 4.5с, можно передать до 32с: tl preview 15)
   {C_CYAN}tl mode [smart|classic]{C_RESET}           Переключить режим камеры: smart (выдержка) или classic (базовый)
   {C_CYAN}tl videos{C_RESET}                         Список готовых MP4 файлов на телефоне
+  {C_CYAN}tl clean [videos|sessions|all]{C_RESET}    Очистить старые файлы на телефоне (по умолчанию: видео)
   {C_CYAN}tl pull [файл|all|now]{C_RESET}            Скачать видео с телефона (tl pull now соберет текущую идущую съемку без остановки)
   {C_CYAN}tl logs{C_RESET}                           Просмотр логов работы камеры в реальном времени
 """)
@@ -450,6 +547,8 @@ def main():
         cmd_mode(args)
     elif cmd == "videos":
         cmd_videos()
+    elif cmd == "clean":
+        cmd_clean(args)
     elif cmd == "pull":
         cmd_pull(args)
     elif cmd == "logs":

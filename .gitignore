@@ -12,3 +12,6 @@ app/build/
 __pycache__/
 *.py[cod]
 *$py.class
+preview.jpg
+previews/
+tl.cmd
