@@ -172,6 +172,27 @@ def cmd_start(args):
     print(f"Интервал: {interval} сек, Длительность: {'без лимита' if duration_min == 0 else f'{duration_hours} ч'}")
     print("Проверьте статус командой: tl status")
 
+def cmd_daily(args):
+    ensure_device()
+    interval = int(args[0]) if len(args) > 0 else 15
+    rotation_hour = int(args[1]) if len(args) > 1 else 4
+    del_jpegs = "true"
+
+    adb_cmd("shell", "input keyevent KEYCODE_WAKEUP", timeout=3)
+    cmd = (
+        f"am start -n com.romchik.timelapse/.ui.MainActivity "
+        f"--ez start_recording true --ei interval {interval} --ei duration 0 "
+        f"--ez delete_jpegs {del_jpegs} --ez daily_mode true --ei daily_hour {rotation_hour}"
+    )
+    adb_cmd("shell", cmd)
+    time.sleep(2.0)
+    adb_cmd("shell", "input keyevent KEYCODE_SLEEP", timeout=3)
+    print(f"{C_GREEN}Запущен круглосуточный режим (24/7 Daily Rotation)!{C_RESET}")
+    print(f"Интервал кадров: {interval} сек")
+    print(f"Автоматическое сохранение видео: каждый день в {rotation_hour:02d}:00 утра")
+    print(f"Имя файла видео: {C_CYAN}timelapse_ГГГГ-ММ-ДД.mp4{C_RESET}")
+    print("Проверьте статус командой: tl status")
+
 def cmd_stop():
     ensure_device()
     adb_cmd("shell", "am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.STOP")
@@ -341,6 +362,7 @@ def show_help():
 Использование:
   {C_CYAN}tl status{C_RESET}                         Проверить состояние съемки, кадры, батарею, память
   {C_CYAN}tl start [интервал] [длительность]{C_RESET}  Запустить съемку (напр: tl start 15 8 -> каждые 15с на 8ч)
+  {C_CYAN}tl daily [интервал] [час]{C_RESET}          Круглосуточная съемка 24/7 с сохранением MP4 каждое утро (напр: tl daily 15 4)
   {C_CYAN}tl stop{C_RESET}                           Остановить съемку и собрать видео MP4
   {C_CYAN}tl schedule <09:00> <21:00> [15]{C_RESET}  Запланировать съемку с ... до ...
   {C_CYAN}tl preview [макс_сек]{C_RESET}              Сделать снимок (по умолчанию до 4.5с, можно передать до 32с: tl preview 15)
@@ -362,6 +384,8 @@ def main():
         cmd_status()
     elif cmd == "start":
         cmd_start(args)
+    elif cmd == "daily":
+        cmd_daily(args)
     elif cmd == "stop":
         cmd_stop()
     elif cmd == "encode":

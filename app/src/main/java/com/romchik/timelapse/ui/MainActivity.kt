@@ -81,6 +81,8 @@ class MainActivity : AppCompatActivity() {
             val interval = intent.getIntExtra("interval", 15)
             val duration = intent.getIntExtra("duration", 0)
             val delJpegs = intent.getBooleanExtra("delete_jpegs", true)
+            val daily = intent.getBooleanExtra("daily_mode", false)
+            val rotHour = intent.getIntExtra("daily_hour", 4)
             intent.removeExtra("start_recording")
 
             wakeUpWindowForCamera()
@@ -92,6 +94,8 @@ class MainActivity : AppCompatActivity() {
                     putExtra(TimelapseService.EXTRA_INTERVAL_SEC, interval)
                     putExtra(TimelapseService.EXTRA_DURATION_MIN, duration)
                     putExtra(TimelapseService.EXTRA_DELETE_JPEGS, delJpegs)
+                    putExtra("daily_mode", daily)
+                    putExtra("daily_hour", rotHour)
                 }
                 ContextCompat.startForegroundService(this@MainActivity, serviceIntent)
                 delay(1200)

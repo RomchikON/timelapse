@@ -96,7 +96,11 @@ object StorageHelper {
     }
 
     fun generateSessionId(): String {
-        return SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+    }
+
+    fun generateDailySessionId(): String {
+        return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
     }
 
     fun updateLastCaptureMeta(meta: CaptureMetadata) {

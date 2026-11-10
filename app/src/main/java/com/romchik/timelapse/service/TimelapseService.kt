@@ -29,6 +29,9 @@ class TimelapseService : Service() {
     private var cameraEngine: TimelapseCameraEngine? = null
 
     private var currentState = STATE_IDLE
+    private var isDailyMode = false
+    private var dailyRotationHour = 4
+    private var lastRotationDay = -1
     private var currentSessionId: String? = null
     private var intervalSec = 15
     private var durationMinutes = 0
@@ -53,7 +56,9 @@ class TimelapseService : Service() {
                 val interval = intent.getIntExtra(EXTRA_INTERVAL_SEC, 15)
                 val duration = intent.getIntExtra(EXTRA_DURATION_MIN, 0)
                 val delJpegs = intent.getBooleanExtra(EXTRA_DELETE_JPEGS, true)
-                startRecording(interval, duration, delJpegs)
+                val daily = intent.getBooleanExtra("daily_mode", false)
+                val rotHour = intent.getIntExtra("daily_hour", 4)
+                startRecording(interval, duration, delJpegs, daily, rotHour)
             }
             ACTION_STOP -> {
                 stopRecording(andEncode = true)
@@ -113,7 +118,13 @@ class TimelapseService : Service() {
         }
     }
 
-    private fun startRecording(interval: Int, duration: Int, delJpegs: Boolean) {
+    private fun startRecording(
+        interval: Int,
+        duration: Int,
+        delJpegs: Boolean,
+        daily: Boolean = false,
+        rotHour: Int = 4
+    ) {
         if (currentState == STATE_RECORDING) {
             Log.w(TAG, "Already recording")
             return
@@ -122,10 +133,21 @@ class TimelapseService : Service() {
         intervalSec = interval.coerceAtLeast(1)
         durationMinutes = duration
         deleteJpegs = delJpegs
+        isDailyMode = daily
+        dailyRotationHour = rotHour
         frameCount = 0
         startTimeMs = System.currentTimeMillis()
-        endTimeMs = if (durationMinutes > 0) startTimeMs + (durationMinutes * 60 * 1000L) else 0L
-        currentSessionId = StorageHelper.generateSessionId()
+        endTimeMs = if (durationMinutes > 0 && !isDailyMode) startTimeMs + (durationMinutes * 60 * 1000L) else 0L
+
+        val cal = java.util.Calendar.getInstance()
+        lastRotationDay = cal.get(java.util.Calendar.DAY_OF_YEAR)
+
+        currentSessionId = if (isDailyMode) {
+            StorageHelper.generateDailySessionId()
+        } else {
+            StorageHelper.generateSessionId()
+        }
+
         currentState = STATE_RECORDING
         isRecordingActive = true
 
@@ -137,11 +159,35 @@ class TimelapseService : Service() {
 
         recordingJob?.cancel()
         recordingJob = serviceScope.launch {
-            val sessionDir = StorageHelper.getSessionDir(currentSessionId!!)
+            var sessionDir = StorageHelper.getSessionDir(currentSessionId!!)
 
             while (isActive && currentState == STATE_RECORDING) {
-                // Check if duration expired
-                if (endTimeMs > 0 && System.currentTimeMillis() >= endTimeMs) {
+                // Check daily rotation at specified hour (e.g. 04:00 AM)
+                if (isDailyMode) {
+                    val nowCal = java.util.Calendar.getInstance()
+                    val currentDay = nowCal.get(java.util.Calendar.DAY_OF_YEAR)
+                    val currentHour = nowCal.get(java.util.Calendar.HOUR_OF_DAY)
+
+                    if (currentDay != lastRotationDay && currentHour >= dailyRotationHour) {
+                        Log.i(TAG, "Daily rotation trigger at hour $currentHour! Rotating session...")
+                        val oldSession = currentSessionId
+                        val oldFrames = frameCount
+
+                        // Rotate to new day session
+                        lastRotationDay = currentDay
+                        frameCount = 0
+                        currentSessionId = StorageHelper.generateDailySessionId()
+                        sessionDir = StorageHelper.getSessionDir(currentSessionId!!)
+
+                        // Encode old day in background asynchronously
+                        if (oldSession != null && oldFrames > 0) {
+                            encodeCompletedSessionAsync(oldSession)
+                        }
+                    }
+                }
+
+                // Check if non-daily duration expired
+                if (!isDailyMode && endTimeMs > 0 && System.currentTimeMillis() >= endTimeMs) {
                     Log.i(TAG, "Duration expired, finishing session")
                     withContext(Dispatchers.Main) {
                         stopRecording(andEncode = true)
@@ -195,6 +241,30 @@ class TimelapseService : Service() {
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+        }
+    }
+
+    private fun encodeCompletedSessionAsync(sessionId: String) {
+        val sessionDir = StorageHelper.getSessionDir(sessionId)
+        serviceScope.launch(Dispatchers.Default) {
+            val outputFile = File(StorageHelper.videosDir, "timelapse_$sessionId.mp4")
+            Log.i(TAG, "Starting background daily encoding for session $sessionId -> ${outputFile.name}")
+            VideoEncoder.encodeSession(
+                context = this@TimelapseService,
+                sessionDir = sessionDir,
+                outputVideoFile = outputFile,
+                width = 1280,
+                height = 720,
+                frameRate = 30,
+                bitRate = 3_000_000,
+                deleteJpegsAfterSuccess = deleteJpegs,
+                onProgress = { current, total ->
+                    if (current % 100 == 0 || current == total) {
+                        Log.i(TAG, "Daily encode progress: $current/$total")
+                    }
+                }
+            )
+            Log.i(TAG, "Finished daily encode for $sessionId")
         }
     }
 
