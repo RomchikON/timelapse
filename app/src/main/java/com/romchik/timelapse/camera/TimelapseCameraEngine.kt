@@ -338,8 +338,8 @@ class TimelapseCameraEngine(private val context: Context) {
             }, 80L)
         }
 
-        // Safety timeout for metering phase (600 ms)
-        handler.postDelayed(proceedToStillCapture, 600L)
+        // Safety timeout for metering phase (750 ms)
+        handler.postDelayed(proceedToStillCapture, 750L)
 
         try {
             val meteringReq = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -347,7 +347,7 @@ class TimelapseCameraEngine(private val context: Context) {
                 set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                 set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
                 set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
             }
 
             session.setRepeatingRequest(
@@ -367,7 +367,8 @@ class TimelapseCameraEngine(private val context: Context) {
                         val converged = (lastAeState == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
                             lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
 
-                        if (framesCount >= 8 && (converged || elapsed >= 450L || framesCount >= 14)) {
+                        // Wait for at least 10 preview frames to ensure ISP AE filter converges smoothly in low light
+                        if (framesCount >= 10 && (converged || elapsed >= 550L || framesCount >= 16)) {
                             handler.removeCallbacks(proceedToStillCapture)
                             proceedToStillCapture.run()
                         }
@@ -436,12 +437,12 @@ class TimelapseCameraEngine(private val context: Context) {
 
         // Anti-flicker Exponential Moving Average smoothing (EMA):
         // Prevents small lighting jitters from bouncing exposure back and forth between adjacent frames.
-        // If light changed drastically (e.g. room light switched on/off > 2.5x), adapt immediately.
-        val targetEv = if (smoothedTargetEv <= 0.0 || Math.abs(Math.log(rawTargetEv / smoothedTargetEv)) > 0.9) {
+        // If light changed drastically (e.g. room light switched on/off > 3.0x), adapt immediately.
+        val targetEv = if (smoothedTargetEv <= 0.0 || Math.abs(Math.log(rawTargetEv / smoothedTargetEv)) > 1.1) {
             smoothedTargetEv = rawTargetEv
             rawTargetEv
         } else {
-            val smoothed = smoothedTargetEv * 0.75 + rawTargetEv * 0.25
+            val smoothed = smoothedTargetEv * 0.85 + rawTargetEv * 0.15
             smoothedTargetEv = smoothed
             smoothed
         }
@@ -567,7 +568,7 @@ class TimelapseCameraEngine(private val context: Context) {
             val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(jReader.surface)
                 set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
                 set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
                 set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY)
                 set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_HIGH_QUALITY)
@@ -579,6 +580,8 @@ class TimelapseCameraEngine(private val context: Context) {
                     set(CaptureRequest.SENSOR_EXPOSURE_TIME, decision.exposureNs)
                     set(CaptureRequest.SENSOR_FRAME_DURATION, decision.exposureNs)
                     set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                    // Lock AF to prevent lens hunting/jitter on tripod
+                    set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
                 } else {
                     set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
                 }
