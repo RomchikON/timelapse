@@ -431,32 +431,33 @@ class TimelapseCameraEngine(private val context: Context) {
         val measuredEv = autoIso.toDouble() * autoExpNs.toDouble()
         val targetEv = measuredEv * lumaBoost
 
-        // 4. Keep ISO around 400 (or lower if only mildly dim) and extend shutter up to adaptiveMaxExpNs
-        val preferredIso = autoIso.coerceIn(200, PREFERRED_ISO_CAP)
-        val expAtPreferredIso = (targetEv / preferredIso.toDouble()).toLong()
+        // 4. In night/dim scene, prioritize keeping shutter fast (under ~1.8s) by scaling ISO up to 800
+        val targetExpNs = 1_800_000_000L.coerceAtMost(adaptiveMaxExpNs)
+        val isoForTargetExp = (targetEv / targetExpNs.toDouble()).toInt().coerceIn(200, PREFERRED_ISO_CAP)
+        val shutterAtIso = (targetEv / isoForTargetExp.toDouble()).toLong()
 
-        if (expAtPreferredIso <= adaptiveMaxExpNs) {
+        if (shutterAtIso <= adaptiveMaxExpNs) {
             return ExposureDecision(
                 useManual = true,
-                iso = preferredIso,
-                exposureNs = expAtPreferredIso.coerceIn(minExpNs, adaptiveMaxExpNs),
+                iso = isoForTargetExp,
+                exposureNs = shutterAtIso.coerceIn(minExpNs, adaptiveMaxExpNs),
                 modeName = "NIGHT_LONG_EXP"
             )
         }
 
-        // Try at ISO 400 specifically if preferredIso was < 400
-        val expAt400 = (targetEv / PREFERRED_ISO_CAP.toDouble()).toLong()
-        if (expAt400 <= adaptiveMaxExpNs) {
+        // Try at max ISO 800 specifically
+        val expAt800 = (targetEv / PREFERRED_ISO_CAP.toDouble()).toLong()
+        if (expAt800 <= adaptiveMaxExpNs) {
             return ExposureDecision(
                 useManual = true,
                 iso = PREFERRED_ISO_CAP,
-                exposureNs = expAt400.coerceIn(minExpNs, adaptiveMaxExpNs),
+                exposureNs = expAt800.coerceIn(minExpNs, adaptiveMaxExpNs),
                 modeName = "NIGHT_LONG_EXP"
             )
         }
 
         // 5. Extreme darkness: shutter is already maxed out at adaptiveMaxExpNs,
-        // so allow ISO to scale up from 400 up to maxIso (3200)
+        // so allow ISO to scale up from 800 up to maxIso (3200)
         val finalExpNs = adaptiveMaxExpNs
         val neededIso = (targetEv / finalExpNs.toDouble()).toInt().coerceIn(PREFERRED_ISO_CAP, maxIso)
 
@@ -665,6 +666,6 @@ class TimelapseCameraEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "TimelapseCameraEngine"
-        private const val PREFERRED_ISO_CAP = 400
+        private const val PREFERRED_ISO_CAP = 800
     }
 }
