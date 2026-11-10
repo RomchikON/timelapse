@@ -277,12 +277,15 @@ class TimelapseService : Service() {
         if (isSnapshot || currentState == STATE_RECORDING) {
             serviceScope.launch(Dispatchers.Default) {
                 val timeTag = java.text.SimpleDateFormat("HH-mm-ss", Locale.US).format(java.util.Date())
-                val outputFile = File(StorageHelper.videosDir, "timelapse_${sessionId}_snap_$timeTag.mp4")
-                Log.i(TAG, "Starting non-destructive snapshot encoding: ${outputFile.name}")
-                VideoEncoder.encodeSession(
+                val targetName = "timelapse_${sessionId}_snap_$timeTag.mp4"
+                val tmpFile = File(StorageHelper.videosDir, "${targetName}.tmp")
+                val finalFile = File(StorageHelper.videosDir, targetName)
+
+                Log.i(TAG, "Starting non-destructive snapshot encoding: ${tmpFile.name}")
+                val success = VideoEncoder.encodeSession(
                     context = this@TimelapseService,
                     sessionDir = sessionDir,
-                    outputVideoFile = outputFile,
+                    outputVideoFile = tmpFile,
                     width = 1280,
                     height = 720,
                     frameRate = 30,
@@ -294,7 +297,14 @@ class TimelapseService : Service() {
                         }
                     }
                 )
-                Log.i(TAG, "Snapshot video created: ${outputFile.name}")
+                if (success && tmpFile.exists()) {
+                    tmpFile.renameTo(finalFile)
+                    StorageHelper.scanMediaFile(this@TimelapseService, finalFile)
+                    Log.i(TAG, "Snapshot video created: ${finalFile.name}")
+                } else {
+                    tmpFile.delete()
+                    Log.e(TAG, "Snapshot encode failed")
+                }
             }
             return
         }
