@@ -78,7 +78,7 @@ object VideoEncoder {
                 inMutable = true
             }
 
-            val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+            val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
 
             val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.WHITE
