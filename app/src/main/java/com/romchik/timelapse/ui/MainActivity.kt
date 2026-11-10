@@ -102,7 +102,9 @@ class MainActivity : AppCompatActivity() {
 
         if (intent?.getBooleanExtra("take_preview", false) == true) {
             val shouldClose = intent.getBooleanExtra("close_after_preview", true)
+            val customMaxExp = if (intent.hasExtra("max_exposure_sec")) intent.getFloatExtra("max_exposure_sec", 4.5f).toDouble() else null
             intent.removeExtra("take_preview")
+            intent.removeExtra("max_exposure_sec")
 
             wakeUpWindowForCamera()
 
@@ -115,6 +117,9 @@ class MainActivity : AppCompatActivity() {
                     // Service already owns the camera in RAM — ask it to take preview
                     val serviceIntent = Intent(this@MainActivity, TimelapseService::class.java).apply {
                         action = TimelapseService.ACTION_TAKE_PREVIEW
+                        if (customMaxExp != null) {
+                            putExtra("max_exposure_sec", customMaxExp)
+                        }
                     }
                     ContextCompat.startForegroundService(this@MainActivity, serviceIntent)
                     delay(1000)
@@ -124,11 +129,13 @@ class MainActivity : AppCompatActivity() {
                     engine.capturePhoto(
                         targetFile = StorageHelper.lastFrameFile,
                         intervalSec = currentInterval,
-                        isPreview = true
+                        isPreview = true,
+                        maxExposureCapSec = customMaxExp
                     ) { success ->
                         completer.complete(success)
                     }
-                    withTimeoutOrNull(14_000L) { completer.await() }
+                    val waitTimeout = ((customMaxExp ?: 4.5) * 1000L + 8000L).toLong().coerceIn(12_000L, 45_000L)
+                    withTimeoutOrNull(waitTimeout) { completer.await() }
                     engine.stop()
                 }
 

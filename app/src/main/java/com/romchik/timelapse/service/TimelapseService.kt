@@ -59,7 +59,8 @@ class TimelapseService : Service() {
                 stopRecording(andEncode = true)
             }
             ACTION_TAKE_PREVIEW -> {
-                takePreviewSnapshot()
+                val customMaxExp = if (intent.hasExtra("max_exposure_sec")) intent.getDoubleExtra("max_exposure_sec", 4.5) else null
+                takePreviewSnapshot(customMaxExp)
             }
             ACTION_ENCODE_NOW -> {
                 val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
@@ -70,13 +71,14 @@ class TimelapseService : Service() {
         return START_STICKY
     }
 
-    private fun takePreviewSnapshot() {
+    private fun takePreviewSnapshot(customMaxExp: Double? = null) {
         if (currentState == STATE_RECORDING) {
             serviceScope.launch {
                 cameraEngine?.capturePhoto(
                     targetFile = StorageHelper.lastFrameFile,
                     intervalSec = intervalSec,
-                    isPreview = true
+                    isPreview = true,
+                    maxExposureCapSec = customMaxExp
                 ) { success ->
                     Log.i(TAG, "Preview snapshot while recording: $success")
                 }
@@ -84,7 +86,8 @@ class TimelapseService : Service() {
             return
         }
 
-        wakeLock?.acquire(20_000L)
+        val lockMs = ((customMaxExp ?: 4.5) * 1000L + 12_000L).toLong().coerceIn(20_000L, 50_000L)
+        wakeLock?.acquire(lockMs)
         startForegroundNotification("Предпросмотр", "Делается снимок камеры...")
 
         serviceScope.launch {
@@ -92,11 +95,12 @@ class TimelapseService : Service() {
             cameraEngine?.capturePhoto(
                 targetFile = StorageHelper.lastFrameFile,
                 intervalSec = intervalSec,
-                isPreview = true
+                isPreview = true,
+                maxExposureCapSec = customMaxExp
             ) { success ->
                 completer.complete(success)
             }
-            val result = withTimeoutOrNull(16_000L) { completer.await() } ?: false
+            val result = withTimeoutOrNull(lockMs - 2000L) { completer.await() } ?: false
             Log.i(TAG, "Preview snapshot completed: $result")
 
             withContext(Dispatchers.Main) {

@@ -204,22 +204,33 @@ def cmd_schedule(args):
     adb_cmd("shell", cmd)
     print(f"{C_GREEN}Расписание успешно установлено:{C_RESET} съемка с {start_time} до {end_time} каждые {interval} сек.")
 
-def cmd_preview():
+def cmd_preview(args):
     ensure_device()
+    custom_max_exp = None
+    if len(args) > 0:
+        try:
+            custom_max_exp = float(args[0])
+            custom_max_exp = max(0.5, min(32.0, custom_max_exp))
+        except ValueError:
+            pass
+
+    cap_msg = f" (макс. выдержка: {custom_max_exp} сек)" if custom_max_exp else " (базовый лимит: 4.5 сек)"
     timestamp = time.strftime("%H%M%S")
     tmp_path = f"/tmp/tl_preview_{timestamp}.jpg"
-    print(f"{C_CYAN}Делаю свежий снимок с камеры (автозамер + адаптивная выдержка)...{C_RESET}")
+    print(f"{C_CYAN}Делаю свежий снимок с камеры (автозамер + адаптивная выдержка){cap_msg}...{C_RESET}")
 
     # Remove old last_frame.jpg so we know when the new frame is written
     adb_cmd("shell", "rm -f /sdcard/Timelapse/last_frame.jpg", timeout=3)
 
     # Wake screen / launch preview
     adb_cmd("shell", "input keyevent KEYCODE_WAKEUP", timeout=3)
-    adb_cmd("shell", "am start -n com.romchik.timelapse/.ui.MainActivity --ez take_preview true --ez close_after_preview true")
+    extra_arg = f" --ef max_exposure_sec {custom_max_exp}" if custom_max_exp else ""
+    adb_cmd("shell", f"am start -n com.romchik.timelapse/.ui.MainActivity --ez take_preview true --ez close_after_preview true{extra_arg}")
 
-    # Wait up to 14s for the new frame (supports up to 4.5s night exposure + metering)
+    # Wait for frame (up to custom_max_exp + 10s)
+    max_wait = int((custom_max_exp or 4.5) + 12) * 2
     ready = False
-    for _ in range(28):
+    for _ in range(max_wait):
         time.sleep(0.5)
         out, code = adb_cmd("shell", "[ -s /sdcard/Timelapse/last_frame.jpg ] && echo READY", timeout=3)
         if code == 0 and "READY" in out:
@@ -332,7 +343,7 @@ def show_help():
   {C_CYAN}tl start [интервал] [длительность]{C_RESET}  Запустить съемку (напр: tl start 15 8 -> каждые 15с на 8ч)
   {C_CYAN}tl stop{C_RESET}                           Остановить съемку и собрать видео MP4
   {C_CYAN}tl schedule <09:00> <21:00> [15]{C_RESET}  Запланировать съемку с ... до ...
-  {C_CYAN}tl preview{C_RESET}                        Сделать свежий снимок и открыть на экране ноутбука
+  {C_CYAN}tl preview [макс_сек]{C_RESET}              Сделать снимок (по умолчанию до 4.5с, можно передать до 32с: tl preview 15)
   {C_CYAN}tl mode [smart|classic]{C_RESET}           Переключить режим камеры: smart (выдержка) или classic (базовый)
   {C_CYAN}tl videos{C_RESET}                         Список готовых MP4 файлов на телефоне
   {C_CYAN}tl pull [файл|all]{C_RESET}                Скачать видео с телефона в ~/Videos/Timelapse/
@@ -358,7 +369,7 @@ def main():
     elif cmd == "schedule":
         cmd_schedule(args)
     elif cmd == "preview":
-        cmd_preview()
+        cmd_preview(args)
     elif cmd == "mode":
         cmd_mode(args)
     elif cmd == "videos":

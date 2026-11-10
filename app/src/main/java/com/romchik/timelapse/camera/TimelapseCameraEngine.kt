@@ -204,6 +204,7 @@ class TimelapseCameraEngine(private val context: Context) {
         targetFile: File,
         intervalSec: Int = 15,
         isPreview: Boolean = false,
+        maxExposureCapSec: Double? = null,
         onComplete: (Boolean) -> Unit
     ) {
         if (!captureInProgressLock.tryAcquire()) {
@@ -238,6 +239,7 @@ class TimelapseCameraEngine(private val context: Context) {
                     targetFile = targetFile,
                     intervalSec = intervalSec,
                     isPreview = isPreview,
+                    maxExposureCapSec = maxExposureCapSec,
                     onComplete = wrappedComplete
                 )
             },
@@ -257,6 +259,7 @@ class TimelapseCameraEngine(private val context: Context) {
         targetFile: File,
         intervalSec: Int,
         isPreview: Boolean,
+        maxExposureCapSec: Double?,
         onComplete: (Boolean) -> Unit
     ) {
         val meteringDone = AtomicBoolean(false)
@@ -274,6 +277,14 @@ class TimelapseCameraEngine(private val context: Context) {
                 // Ignore
             }
 
+            // In total darkness, if AE is still searching (0) and hasn't ramped up, default to sensor max sensitivity
+            if (lastAeState == CameraMetadata.CONTROL_AE_STATE_SEARCHING || lastAeState == CameraMetadata.CONTROL_AE_STATE_INACTIVE) {
+                if (measuredIso <= 400 && latestMeteringLuma < 15.0) {
+                    measuredIso = 3200
+                    measuredExpNs = 74_000_000L
+                }
+            }
+
             val userExpMode = StorageHelper.getExposureMode()
             val decision = if (userExpMode == "CLASSIC" || userExpMode == "BASIC" || userExpMode == "AUTO") {
                 // Basic standard Android auto-exposure mode (no manual long shutter, no custom cap)
@@ -283,6 +294,14 @@ class TimelapseCameraEngine(private val context: Context) {
                     exposureNs = measuredExpNs,
                     modeName = "CLASSIC_AUTO"
                 )
+            } else if (userExpMode == "TEST15" || userExpMode == "TEST15S") {
+                // Forced 15-second long exposure at max ISO 3200 for extreme dark testing
+                ExposureDecision(
+                    useManual = true,
+                    iso = 3200,
+                    exposureNs = 15_000_000_000L,
+                    modeName = "TEST_15S_EXPOSURE"
+                )
             } else {
                 val currentLuma = latestMeteringLuma
                 calculateSmartExposure(
@@ -291,7 +310,8 @@ class TimelapseCameraEngine(private val context: Context) {
                     aeState = lastAeState,
                     liveLuma = currentLuma,
                     intervalSec = intervalSec,
-                    isPreview = isPreview
+                    isPreview = isPreview,
+                    maxExposureCapSec = maxExposureCapSec
                 )
             }
 
@@ -365,15 +385,22 @@ class TimelapseCameraEngine(private val context: Context) {
         aeState: Int,
         liveLuma: Double,
         intervalSec: Int,
-        isPreview: Boolean
+        isPreview: Boolean,
+        maxExposureCapSec: Double? = null
     ): ExposureDecision {
-        // 1. Determine adaptive max exposure time based on interval
-        val maxAllowedSec = if (isPreview) {
-            // Keep interactive CLI preview responsive while still allowing up to 4.5s night shutter
+        // 1. Determine adaptive max exposure time based on interval and custom cap
+        val defaultCapSec = if (isPreview) {
+            // Default 4.5s preview limit unless user specified custom cap
             (intervalSec - 1.5).coerceIn(2.0, 4.5)
         } else {
             // Reserve ~1.8s for metering + ISP readout + JPEG save
-            (intervalSec - 1.8).coerceIn(0.5, 14.0)
+            (intervalSec - 1.8).coerceIn(0.5, 30.0)
+        }
+
+        val maxAllowedSec = if (maxExposureCapSec != null && maxExposureCapSec > 0.1) {
+            maxExposureCapSec.coerceIn(0.2, 32.0)
+        } else {
+            defaultCapSec
         }
         val adaptiveMaxExpNs = (maxAllowedSec * 1_000_000_000.0).toLong().coerceIn(minExpNs, maxExpNs)
 
