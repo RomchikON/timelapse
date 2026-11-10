@@ -234,10 +234,12 @@ class TimelapseService : Service() {
         val finishedSession = currentSessionId
         val finalFrames = frameCount
 
+        // Set state to IDLE first so triggerEncode knows this is a full stop, not a live snapshot!
+        currentState = STATE_IDLE
+
         if (andEncode && finishedSession != null && finalFrames > 0) {
-            triggerEncode(finishedSession)
+            triggerEncode(finishedSession, isSnapshot = false)
         } else {
-            currentState = STATE_IDLE
             broadcastStatus()
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
