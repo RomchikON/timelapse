@@ -257,7 +257,7 @@ class TimelapseService : Service() {
                 width = 1280,
                 height = 720,
                 frameRate = 30,
-                bitRate = 3_000_000,
+                bitRate = 8_000_000,
                 deleteJpegsAfterSuccess = deleteJpegs,
                 onProgress = { current, total ->
                     if (current % 100 == 0 || current == total) {
@@ -289,7 +289,7 @@ class TimelapseService : Service() {
                     width = 1280,
                     height = 720,
                     frameRate = 30,
-                    bitRate = 3_000_000,
+                    bitRate = 8_000_000,
                     deleteJpegsAfterSuccess = false, // NEVER delete frames during live snapshot!
                     onProgress = { current, total ->
                         if (current % 150 == 0 || current == total) {
@@ -324,7 +324,7 @@ class TimelapseService : Service() {
                 width = 1280,
                 height = 720,
                 frameRate = 30,
-                bitRate = 3_000_000,
+                bitRate = 8_000_000,
                 deleteJpegsAfterSuccess = deleteJpegs,
                 onProgress = { current, total ->
                     updateNotification("Сборка MP4: $current/$total")

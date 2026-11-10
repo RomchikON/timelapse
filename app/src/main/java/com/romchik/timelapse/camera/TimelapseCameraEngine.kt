@@ -40,6 +40,9 @@ class TimelapseCameraEngine(private val context: Context) {
     @Volatile
     private var latestMeteringLuma: Double = 80.0
 
+    @Volatile
+    private var smoothedTargetEv: Double = 0.0
+
     init {
         findBackCamera()
     }
@@ -429,7 +432,19 @@ class TimelapseCameraEngine(private val context: Context) {
         }
 
         val measuredEv = autoIso.toDouble() * autoExpNs.toDouble()
-        val targetEv = measuredEv * lumaBoost
+        val rawTargetEv = measuredEv * lumaBoost
+
+        // Anti-flicker Exponential Moving Average smoothing (EMA):
+        // Prevents small lighting jitters from bouncing exposure back and forth between adjacent frames.
+        // If light changed drastically (e.g. room light switched on/off > 2.5x), adapt immediately.
+        val targetEv = if (smoothedTargetEv <= 0.0 || Math.abs(Math.log(rawTargetEv / smoothedTargetEv)) > 0.9) {
+            smoothedTargetEv = rawTargetEv
+            rawTargetEv
+        } else {
+            val smoothed = smoothedTargetEv * 0.75 + rawTargetEv * 0.25
+            smoothedTargetEv = smoothed
+            smoothed
+        }
 
         // 4. In night/dim scene, prioritize keeping shutter fast (under ~1.8s) by scaling ISO up to 800
         val targetExpNs = 1_800_000_000L.coerceAtMost(adaptiveMaxExpNs)

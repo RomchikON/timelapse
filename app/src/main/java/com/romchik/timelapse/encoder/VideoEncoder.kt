@@ -22,7 +22,7 @@ object VideoEncoder {
         width: Int = 1280,
         height: Int = 720,
         frameRate: Int = 30,
-        bitRate: Int = 3_000_000,
+        bitRate: Int = 8_000_000,
         deleteJpegsAfterSuccess: Boolean = true,
         onProgress: ((Int, Int) -> Unit)? = null
     ): Boolean {
