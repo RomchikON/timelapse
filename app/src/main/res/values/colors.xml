@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#121212</color>
+    <color name="surface_dark">#1E1E1E</color>
+    <color name="card_dark">#262626</color>
+    <color name="card_border">#333333</color>
+    
+    <color name="primary">#00E676</color>
+    <color name="primary_dark">#00B0FF</color>
+    <color name="accent_stop">#FF5252</color>
+    <color name="accent_warning">#FFAB00</color>
+    
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#9E9E9E</color>
+    <color name="text_muted">#616161</color>
+</resources>

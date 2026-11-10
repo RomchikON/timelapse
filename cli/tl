@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+import sys
+import os
+import time
+import json
+import subprocess
+import shutil
+
+ADB_BIN = os.path.expanduser("~/.local/platform-tools/adb")
+if not os.path.exists(ADB_BIN):
+    ADB_BIN = shutil.which("adb") or "adb"
+
+# Terminal Colors
+C_RESET = "\033[0m"
+C_BOLD = "\033[1m"
+C_GREEN = "\033[32m"
+C_BLUE = "\033[34m"
+C_CYAN = "\033[36m"
+C_RED = "\033[31m"
+C_YELLOW = "\033[33m"
+C_MAGENTA = "\033[35m"
+
+def get_active_device():
+    try:
+        res = subprocess.run([ADB_BIN, "devices"], capture_output=True, text=True, timeout=3)
+        devices = []
+        for line in res.stdout.splitlines()[1:]:
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1] == "device":
+                devices.append(parts[0])
+        for d in devices:
+            if ":5555" in d:
+                return d
+        for d in devices:
+            if "192.168.31." in d:
+                return d
+        if devices:
+            return devices[0]
+    except Exception:
+        pass
+    return "192.168.31.216:5555"
+
+DEVICE_SERIAL = get_active_device()
+
+def adb_cmd(*args, timeout=8):
+    global DEVICE_SERIAL
+    cmd = [ADB_BIN, "-s", DEVICE_SERIAL] + list(args)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return res.stdout.strip(), res.returncode
+    except subprocess.TimeoutExpired:
+        return "", 1
+    except Exception as e:
+        return "", 1
+
+def ensure_device():
+    global DEVICE_SERIAL
+    DEVICE_SERIAL = get_active_device()
+    out, code = adb_cmd("get-state", timeout=3)
+    if code != 0 or out != "device":
+        adb_cmd("connect", "192.168.31.216:5555", timeout=3)
+        DEVICE_SERIAL = get_active_device()
+        out, code = adb_cmd("get-state", timeout=3)
+        if code != 0 or out != "device":
+            print(f"{C_RED}Ошибка: Телефон недоступен через ADB ({DEVICE_SERIAL})!{C_RESET}")
+            print("Убедитесь, что телефон подключен к домашнему Wi-Fi.")
+            sys.exit(1)
+
+def cmd_status():
+    ensure_device()
+    out, code = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
+    status_data = {}
+    if code == 0 and out.startswith("{"):
+        try:
+            status_data = json.loads(out)
+        except Exception:
+            pass
+
+    # Read live battery info
+    batt_out, _ = adb_cmd("shell", "dumpsys battery", timeout=3)
+    batt_level = "?"
+    batt_temp = "?"
+    charging = False
+    for line in batt_out.splitlines():
+        line = line.strip()
+        if line.startswith("level:"):
+            batt_level = line.split(":")[1].strip() + "%"
+        elif line.startswith("temperature:"):
+            try:
+                t = float(line.split(":")[1].strip()) / 10.0
+                batt_temp = f"{t:.1f}°C"
+            except:
+                pass
+        elif line.startswith("status:"):
+            s = line.split(":")[1].strip()
+            charging = s in ["2", "5"]
+
+    # Storage
+    df_out, _ = adb_cmd("shell", "df -h /storage/emulated", timeout=3)
+    free_storage = "?"
+    lines = df_out.splitlines()
+    if len(lines) >= 2:
+        parts = lines[1].split()
+        if len(parts) >= 4:
+            free_storage = parts[3]
+
+    state = status_data.get("state", "IDLE")
+    frames = status_data.get("frames_captured", 0)
+    video_dur = status_data.get("video_duration_sec", "0.0")
+    interval = status_data.get("interval_sec", 15)
+    duration_min = status_data.get("duration_minutes", 0)
+    session_id = status_data.get("session_id", "—")
+
+    state_color = C_GREEN if state == "IDLE" else (C_RED if state == "RECORDING" else C_YELLOW)
+    state_ru = {
+        "IDLE": "ОЖИДАНИЕ (ГОТОВ)",
+        "RECORDING": "ИДЕТ СЪЕМКА 📸",
+        "ENCODING": "СБОРКА MP4 🎬",
+        "SCHEDULED": "ПО РАСПИСАНИЮ ⏰"
+    }.get(state, state)
+
+    print(f"\n{C_BOLD}=== СТАТУС ТАЙМЛАПСА (Redmi Note 8 Pro) ==={C_RESET}")
+    print(f"Подключение:         {C_BLUE}{DEVICE_SERIAL}{C_RESET}")
+    print(f"Состояние:           {state_color}{C_BOLD}{state_ru}{C_RESET}")
+    print(f"Сессия:              {session_id}")
+    print(f"Снято кадров:        {C_CYAN}{frames}{C_RESET}")
+    print(f"Длина видео:         {C_CYAN}{video_dur} сек{C_RESET} (@ 30 fps)")
+    print(f"Интервал съемки:     {interval} сек")
+    dur_str = "Без лимита" if duration_min == 0 else f"{duration_min // 60} ч {duration_min % 60} мин"
+    print(f"Таймер сессии:       {dur_str}")
+    charge_icon = "⚡" if charging else "🔋"
+    print(f"Батарея:             {charge_icon} {batt_level} ({batt_temp})")
+    print(f"Свободно на диске:   💾 {free_storage}")
+    print("=" * 43 + "\n")
+
+def cmd_start(args):
+    ensure_device()
+    interval = int(args[0]) if len(args) > 0 else 15
+    duration_hours = float(args[1]) if len(args) > 1 else 0
+    duration_min = int(duration_hours * 60)
+    del_jpegs = "true"
+
+    cmd = (
+        f"am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.START "
+        f"--ei interval {interval} --ei duration {duration_min} --ez delete_jpegs {del_jpegs}"
+    )
+    adb_cmd("shell", cmd)
+    print(f"{C_GREEN}Команда старта отправлена!{C_RESET}")
+    print(f"Интервал: {interval} сек, Длительность: {'без лимита' if duration_min == 0 else f'{duration_hours} ч'}")
+    print("Проверьте статус командой: tl status")
+
+def cmd_stop():
+    ensure_device()
+    adb_cmd("shell", "am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.STOP")
+    print(f"{C_YELLOW}Съемка остановлена! Запущена автосборка MP4 видео...{C_RESET}")
+    print("Проверьте процесс сборки командой: tl status")
+
+def cmd_encode(args):
+    ensure_device()
+    session_id = args[0] if len(args) > 0 else ""
+    cmd = "am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.ENCODE"
+    if session_id:
+        cmd += f" --es session_id {session_id}"
+    adb_cmd("shell", cmd)
+    print(f"{C_CYAN}Запущена сборка видео в MP4...{C_RESET}")
+
+def cmd_schedule(args):
+    if len(args) < 2:
+        print("Использование: tl schedule <ВРЕМЯ_НАЧАЛА_HH:MM> <ВРЕМЯ_КОНЦА_HH:MM> [интервал]")
+        print("Пример:        tl schedule 09:00 21:00 15")
+        return
+    ensure_device()
+    start_time = args[0]
+    end_time = args[1]
+    interval = int(args[2]) if len(args) > 2 else 15
+
+    cmd = (
+        f"am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.SCHEDULE "
+        f"--es start '{start_time}' --es end '{end_time}' --ei interval {interval} --ez delete_jpegs true"
+    )
+    adb_cmd("shell", cmd)
+    print(f"{C_GREEN}Расписание успешно установлено:{C_RESET} съемка с {start_time} до {end_time} каждые {interval} сек.")
+
+def cmd_preview():
+    ensure_device()
+    timestamp = time.strftime("%H%M%S")
+    tmp_path = f"/tmp/tl_preview_{timestamp}.jpg"
+    print(f"{C_CYAN}Делаю свежий снимок с камеры...{C_RESET}")
+
+    # Wake screen / launch preview
+    adb_cmd("shell", "am start -n com.romchik.timelapse/.ui.MainActivity --ez take_preview true --ez close_after_preview true")
+    time.sleep(2.0)
+
+    out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", tmp_path, timeout=5)
+    if code != 0 or not os.path.exists(tmp_path):
+        print(f"{C_RED}Не удалось получить снимок с камеры.{C_RESET}")
+        return
+    size_kb = os.path.getsize(tmp_path) / 1024.0
+    print(f"{C_GREEN}Свежий кадр получен:{C_RESET} {tmp_path} ({size_kb:.1f} KB)")
+    viewer = shutil.which("xdg-open")
+    if viewer and "DISPLAY" in os.environ:
+        subprocess.Popen([viewer, tmp_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("Открываю просмотр изображения на экране...")
+
+def cmd_videos():
+    ensure_device()
+    out, code = adb_cmd("shell", "ls -lh /sdcard/Timelapse/videos/*.mp4 2>/dev/null")
+    if code != 0 or not out:
+        print("Видео пока нет.")
+        return
+    print(f"\n{C_BOLD}Готовые таймлапс-видео на телефоне:{C_RESET}")
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 8:
+            size = parts[4]
+            name = parts[-1].split("/")[-1]
+            print(f"  🎬 {C_CYAN}{name}{C_RESET}  ({size})")
+    print()
+
+def cmd_pull(args):
+    ensure_device()
+    target_dir = os.path.expanduser("~/Videos/Timelapse")
+    os.makedirs(target_dir, exist_ok=True)
+    target_file = args[0] if len(args) > 0 else ""
+
+    if target_file and target_file != "all":
+        phone_path = f"/sdcard/Timelapse/videos/{target_file}"
+        print(f"Скачиваю {target_file} в {target_dir}...")
+        adb_cmd("pull", phone_path, target_dir)
+    else:
+        print(f"Скачиваю все видео в {target_dir}...")
+        adb_cmd("pull", "/sdcard/Timelapse/videos/.", target_dir)
+    print(f"{C_GREEN}Готово! Файлы сохранены в {target_dir}{C_RESET}")
+
+def cmd_logs():
+    ensure_device()
+    print(f"{C_CYAN}Показ логов таймлапса (Ctrl+C для выхода)...{C_RESET}")
+    subprocess.run([ADB_BIN, "-s", DEVICE_SERIAL, "logcat", "-v", "time", "-s", "TimelapseService:V", "VideoEncoder:V", "TimelapseCameraEngine:V", "CommandReceiver:V"])
+
+def show_help():
+    print(f"""{C_BOLD}Управление таймлапсом на Redmi Note 8 Pro (tl){C_RESET}
+
+Использование:
+  {C_CYAN}tl status{C_RESET}                         Проверить состояние съемки, кадры, батарею, память
+  {C_CYAN}tl start [интервал] [длительность]{C_RESET}  Запустить съемку (напр: tl start 15 8 -> каждые 15с на 8ч)
+  {C_CYAN}tl stop{C_RESET}                           Остановить съемку и собрать видео MP4
+  {C_CYAN}tl schedule <09:00> <21:00> [15]{C_RESET}  Запланировать съемку с ... до ...
+  {C_CYAN}tl preview{C_RESET}                        Сделать свежий снимок и открыть на экране ноутбука
+  {C_CYAN}tl videos{C_RESET}                         Список готовых MP4 файлов на телефоне
+  {C_CYAN}tl pull [файл|all]{C_RESET}                Скачать видео с телефона в ~/Videos/Timelapse/
+  {C_CYAN}tl logs{C_RESET}                           Просмотр логов работы камеры в реальном времени
+""")
+
+def main():
+    if len(sys.argv) < 2:
+        show_help()
+        return
+
+    cmd = sys.argv[1].lower()
+    args = sys.argv[2:]
+
+    if cmd == "status":
+        cmd_status()
+    elif cmd == "start":
+        cmd_start(args)
+    elif cmd == "stop":
+        cmd_stop()
+    elif cmd == "encode":
+        cmd_encode(args)
+    elif cmd == "schedule":
+        cmd_schedule(args)
+    elif cmd == "preview":
+        cmd_preview()
+    elif cmd == "videos":
+        cmd_videos()
+    elif cmd == "pull":
+        cmd_pull(args)
+    elif cmd == "logs":
+        cmd_logs()
+    else:
+        show_help()
+
+if __name__ == "__main__":
+    main()

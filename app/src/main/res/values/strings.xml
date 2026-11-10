@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Timelapse Cam</string>
+    <string name="status_idle">Готов к съемке</string>
+    <string name="status_recording">Идет съемка</string>
+    <string name="status_encoding">Сборка MP4...</string>
+    <string name="status_scheduled">По расписанию</string>
+</resources>
