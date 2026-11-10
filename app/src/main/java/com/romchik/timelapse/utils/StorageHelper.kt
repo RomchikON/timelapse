@@ -12,6 +12,27 @@ import java.util.Locale
 
 object StorageHelper {
 
+    data class CaptureMetadata(
+        val iso: Int = 100,
+        val exposureNs: Long = 33_333_333L,
+        val luma: Int = 100,
+        val mode: String = "AUTO"
+    ) {
+        val exposureFormatted: String
+            get() {
+                val sec = exposureNs / 1_000_000_000.0
+                return if (sec >= 0.3) {
+                    String.format(Locale.US, "%.2f сек", sec)
+                } else {
+                    val denom = (1.0 / sec.coerceAtLeast(0.0001)).toInt().coerceAtLeast(1)
+                    "1/$denom сек"
+                }
+            }
+    }
+
+    @Volatile
+    var lastCaptureMeta: CaptureMetadata = CaptureMetadata()
+
     private val baseDir: File
         get() {
             val root = Environment.getExternalStorageDirectory()
@@ -58,6 +79,22 @@ object StorageHelper {
         return SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     }
 
+    fun updateLastCaptureMeta(meta: CaptureMetadata) {
+        lastCaptureMeta = meta
+        try {
+            val existing = readStatus() ?: JSONObject()
+            existing.put("last_iso", meta.iso)
+            existing.put("last_exposure_ns", meta.exposureNs)
+            existing.put("last_exposure_str", meta.exposureFormatted)
+            existing.put("last_luma", meta.luma)
+            existing.put("exposure_mode", meta.mode)
+            existing.put("last_updated", System.currentTimeMillis())
+            statusFile.writeText(existing.toString(2))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     fun writeStatus(
         state: String,
         sessionId: String?,
@@ -72,6 +109,7 @@ object StorageHelper {
         scheduledEnd: String? = null
     ) {
         try {
+            val meta = lastCaptureMeta
             val json = JSONObject().apply {
                 put("state", state)
                 put("session_id", sessionId ?: "")
@@ -88,6 +126,11 @@ object StorageHelper {
                 put("free_storage_gb", String.format(Locale.US, "%.1f", getAvailableStorageGb()))
                 put("scheduled_start", scheduledStart ?: "")
                 put("scheduled_end", scheduledEnd ?: "")
+                put("last_iso", meta.iso)
+                put("last_exposure_ns", meta.exposureNs)
+                put("last_exposure_str", meta.exposureFormatted)
+                put("last_luma", meta.luma)
+                put("exposure_mode", meta.mode)
                 put("last_updated", System.currentTimeMillis())
             }
             statusFile.writeText(json.toString(2))

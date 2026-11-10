@@ -110,6 +110,16 @@ def cmd_status():
     interval = status_data.get("interval_sec", 15)
     duration_min = status_data.get("duration_minutes", 0)
     session_id = status_data.get("session_id", "—")
+    exp_mode = status_data.get("exposure_mode", "AUTO")
+    last_iso = status_data.get("last_iso", "—")
+    last_exp_str = status_data.get("last_exposure_str", "—")
+    last_luma = status_data.get("last_luma", "—")
+
+    exp_mode_ru = {
+        "AUTO": "☀️ Авто (Дневной)",
+        "NIGHT_LONG_EXP": "🌙 Ночной (Длинная выдержка)",
+        "NIGHT_MAX_BOOST": "🌌 Глубокая ночь (Макс. выдержка + ISO)"
+    }.get(exp_mode, exp_mode)
 
     state_color = C_GREEN if state == "IDLE" else (C_RED if state == "RECORDING" else C_YELLOW)
     state_ru = {
@@ -128,6 +138,8 @@ def cmd_status():
     print(f"Интервал съемки:     {interval} сек")
     dur_str = "Без лимита" if duration_min == 0 else f"{duration_min // 60} ч {duration_min % 60} мин"
     print(f"Таймер сессии:       {dur_str}")
+    print(f"Режим экспозиции:    {C_MAGENTA}{exp_mode_ru}{C_RESET}")
+    print(f"Последний кадр:      ISO {last_iso} | Выдержка {last_exp_str} | Яркость {last_luma}/255")
     charge_icon = "⚡" if charging else "🔋"
     print(f"Батарея:             {charge_icon} {batt_level} ({batt_temp})")
     print(f"Свободно на диске:   💾 {free_storage}")
@@ -140,11 +152,14 @@ def cmd_start(args):
     duration_min = int(duration_hours * 60)
     del_jpegs = "true"
 
+    adb_cmd("shell", "input keyevent KEYCODE_WAKEUP", timeout=3)
     cmd = (
-        f"am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.START "
-        f"--ei interval {interval} --ei duration {duration_min} --ez delete_jpegs {del_jpegs}"
+        f"am start -n com.romchik.timelapse/.ui.MainActivity "
+        f"--ez start_recording true --ei interval {interval} --ei duration {duration_min} --ez delete_jpegs {del_jpegs}"
     )
     adb_cmd("shell", cmd)
+    time.sleep(2.0)
+    adb_cmd("shell", "input keyevent KEYCODE_SLEEP", timeout=3)
     print(f"{C_GREEN}Команда старта отправлена!{C_RESET}")
     print(f"Интервал: {interval} сек, Длительность: {'без лимита' if duration_min == 0 else f'{duration_hours} ч'}")
     print("Проверьте статус командой: tl status")
@@ -185,18 +200,51 @@ def cmd_preview():
     ensure_device()
     timestamp = time.strftime("%H%M%S")
     tmp_path = f"/tmp/tl_preview_{timestamp}.jpg"
-    print(f"{C_CYAN}Делаю свежий снимок с камеры...{C_RESET}")
+    print(f"{C_CYAN}Делаю свежий снимок с камеры (автозамер + адаптивная выдержка)...{C_RESET}")
+
+    # Remove old last_frame.jpg so we know when the new frame is written
+    adb_cmd("shell", "rm -f /sdcard/Timelapse/last_frame.jpg", timeout=3)
 
     # Wake screen / launch preview
+    adb_cmd("shell", "input keyevent KEYCODE_WAKEUP", timeout=3)
     adb_cmd("shell", "am start -n com.romchik.timelapse/.ui.MainActivity --ez take_preview true --ez close_after_preview true")
-    time.sleep(2.0)
 
-    out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", tmp_path, timeout=5)
-    if code != 0 or not os.path.exists(tmp_path):
-        print(f"{C_RED}Не удалось получить снимок с камеры.{C_RESET}")
+    # Wait up to 14s for the new frame (supports up to 4.5s night exposure + metering)
+    ready = False
+    for _ in range(28):
+        time.sleep(0.5)
+        out, code = adb_cmd("shell", "[ -s /sdcard/Timelapse/last_frame.jpg ] && echo READY", timeout=3)
+        if code == 0 and "READY" in out:
+            ready = True
+            break
+
+    adb_cmd("shell", "input keyevent KEYCODE_SLEEP", timeout=3)
+
+    if not ready:
+        print(f"{C_RED}Таймаут ожидания снимка с камеры.{C_RESET}")
         return
+
+    out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", tmp_path, timeout=6)
+    if code != 0 or not os.path.exists(tmp_path):
+        print(f"{C_RED}Не удалось скачать снимок с камеры.{C_RESET}")
+        return
+
+    # Read exposure metadata from status.json
+    st_out, st_code = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
+    meta_str = ""
+    if st_code == 0 and st_out.startswith("{"):
+        try:
+            st = json.loads(st_out)
+            iso = st.get("last_iso", "?")
+            exp_s = st.get("last_exposure_str", "?")
+            luma = st.get("last_luma", "?")
+            mode = st.get("exposure_mode", "AUTO")
+            meta_str = f" | Режим: {C_MAGENTA}{mode}{C_RESET} | ISO: {C_YELLOW}{iso}{C_RESET} | Выдержка: {C_YELLOW}{exp_s}{C_RESET} | Яркость: {luma}/255"
+        except Exception:
+            pass
+
     size_kb = os.path.getsize(tmp_path) / 1024.0
-    print(f"{C_GREEN}Свежий кадр получен:{C_RESET} {tmp_path} ({size_kb:.1f} KB)")
+    print(f"{C_GREEN}Свежий кадр получен:{C_RESET} {tmp_path} ({size_kb:.1f} KB){meta_str}")
     viewer = shutil.which("xdg-open")
     if viewer and "DISPLAY" in os.environ:
         subprocess.Popen([viewer, tmp_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

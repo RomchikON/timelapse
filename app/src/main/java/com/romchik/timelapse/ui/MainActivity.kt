@@ -77,35 +77,88 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handlePreviewIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra("start_recording", false) == true) {
+            val interval = intent.getIntExtra("interval", 15)
+            val duration = intent.getIntExtra("duration", 0)
+            val delJpegs = intent.getBooleanExtra("delete_jpegs", true)
+            intent.removeExtra("start_recording")
+
+            wakeUpWindowForCamera()
+
+            lifecycleScope.launch(Dispatchers.Main) {
+                delay(250)
+                val serviceIntent = Intent(this@MainActivity, TimelapseService::class.java).apply {
+                    action = TimelapseService.ACTION_START
+                    putExtra(TimelapseService.EXTRA_INTERVAL_SEC, interval)
+                    putExtra(TimelapseService.EXTRA_DURATION_MIN, duration)
+                    putExtra(TimelapseService.EXTRA_DELETE_JPEGS, delJpegs)
+                }
+                ContextCompat.startForegroundService(this@MainActivity, serviceIntent)
+                delay(1200)
+                moveTaskToBack(true)
+            }
+            return
+        }
+
         if (intent?.getBooleanExtra("take_preview", false) == true) {
             val shouldClose = intent.getBooleanExtra("close_after_preview", true)
             intent.removeExtra("take_preview")
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                setShowWhenLocked(true)
-                setTurnScreenOn(true)
-            } else {
-                @Suppress("DEPRECATION")
-                window.addFlags(
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                )
-            }
+            wakeUpWindowForCamera()
 
             lifecycleScope.launch(Dispatchers.Main) {
-                delay(300)
-                val engine = TimelapseCameraEngine(this@MainActivity).apply { start() }
-                val completer = CompletableDeferred<Boolean>()
-                engine.capturePhoto(StorageHelper.lastFrameFile) { success ->
-                    completer.complete(success)
-                }
-                withTimeoutOrNull(6000L) { completer.await() }
-                engine.stop()
+                delay(350)
+                val status = StorageHelper.readStatus()
+                val currentInterval = status?.optInt("interval_sec", selectedIntervalSec) ?: selectedIntervalSec
 
-                if (shouldClose && currentState != TimelapseService.STATE_RECORDING) {
+                if (TimelapseService.isRecordingActive) {
+                    // Service already owns the camera in RAM — ask it to take preview
+                    val serviceIntent = Intent(this@MainActivity, TimelapseService::class.java).apply {
+                        action = TimelapseService.ACTION_TAKE_PREVIEW
+                    }
+                    ContextCompat.startForegroundService(this@MainActivity, serviceIntent)
+                    delay(1000)
+                } else {
+                    val engine = TimelapseCameraEngine(this@MainActivity).apply { start() }
+                    val completer = CompletableDeferred<Boolean>()
+                    engine.capturePhoto(
+                        targetFile = StorageHelper.lastFrameFile,
+                        intervalSec = currentInterval,
+                        isPreview = true
+                    ) { success ->
+                        completer.complete(success)
+                    }
+                    withTimeoutOrNull(14_000L) { completer.await() }
+                    engine.stop()
+                }
+
+                if (shouldClose && !TimelapseService.isRecordingActive) {
                     moveTaskToBack(true)
                 }
             }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun wakeUpWindowForCamera() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val screenLock = pm.newWakeLock(
+                PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "Timelapse::ScreenWake"
+            )
+            screenLock.acquire(10_000L)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 

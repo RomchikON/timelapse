@@ -2,8 +2,10 @@ package com.romchik.timelapse.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.hardware.camera2.*
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -13,6 +15,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class TimelapseCameraEngine(private val context: Context) {
 
@@ -20,12 +23,22 @@ class TimelapseCameraEngine(private val context: Context) {
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
+    private var meteringReader: ImageReader? = null
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
 
     private val cameraOpenCloseLock = Semaphore(1)
+    private val captureInProgressLock = Semaphore(1)
     private var cameraId: String? = null
+
+    private var minIso: Int = 100
+    private var maxIso: Int = 3200
+    private var minExpNs: Long = 100_000L
+    private var maxExpNs: Long = 32_000_000_000L
+
+    @Volatile
+    private var latestMeteringLuma: Double = 80.0
 
     init {
         findBackCamera()
@@ -37,12 +50,27 @@ class TimelapseCameraEngine(private val context: Context) {
             val facing = chars.get(CameraCharacteristics.LENS_FACING)
             if (facing == CameraCharacteristics.LENS_FACING_BACK) {
                 cameraId = id
+                extractSensorRanges(chars)
                 break
             }
         }
         if (cameraId == null && cameraManager.cameraIdList.isNotEmpty()) {
-            cameraId = cameraManager.cameraIdList[0]
+            val fallbackId = cameraManager.cameraIdList[0]
+            cameraId = fallbackId
+            extractSensorRanges(cameraManager.getCameraCharacteristics(fallbackId))
         }
+    }
+
+    private fun extractSensorRanges(chars: CameraCharacteristics) {
+        chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { range ->
+            minIso = range.lower
+            maxIso = range.upper
+        }
+        chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let { range ->
+            minExpNs = range.lower
+            maxExpNs = range.upper
+        }
+        Log.i(TAG, "Sensor ranges: ISO [$minIso..$maxIso], Exposure [${minExpNs}ns..${maxExpNs}ns]")
     }
 
     fun start() {
@@ -82,6 +110,25 @@ class TimelapseCameraEngine(private val context: Context) {
                 return
             }
 
+            meteringReader = ImageReader.newInstance(640, 360, ImageFormat.YUV_420_888, 3).apply {
+                setOnImageAvailableListener({ reader ->
+                    val img = try {
+                        reader.acquireLatestImage()
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (img != null) {
+                        try {
+                            latestMeteringLuma = computeYuvLuma(img)
+                        } catch (e: Exception) {
+                            // Ignore
+                        } finally {
+                            img.close()
+                        }
+                    }
+                }, backgroundHandler)
+            }
+
             imageReader = ImageReader.newInstance(1280, 720, ImageFormat.JPEG, 2)
 
             cameraManager.openCamera(targetId, object : CameraDevice.StateCallback() {
@@ -95,12 +142,14 @@ class TimelapseCameraEngine(private val context: Context) {
                     cameraOpenCloseLock.release()
                     camera.close()
                     cameraDevice = null
+                    captureSession = null
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
                     cameraOpenCloseLock.release()
                     camera.close()
                     cameraDevice = null
+                    captureSession = null
                     onError("CameraDevice error code: $error")
                 }
             }, backgroundHandler)
@@ -116,18 +165,20 @@ class TimelapseCameraEngine(private val context: Context) {
         onReady: () -> Unit,
         onError: (String) -> Unit
     ) {
-        val reader = imageReader ?: run {
-            onError("ImageReader not initialized")
+        val mReader = meteringReader
+        val jReader = imageReader
+        if (mReader == null || jReader == null) {
+            onError("ImageReaders not initialized")
             return
         }
 
         try {
             camera.createCaptureSession(
-                listOf(reader.surface),
+                listOf(mReader.surface, jReader.surface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
-                        Log.i(TAG, "CameraCaptureSession configured")
+                        Log.i(TAG, "CameraCaptureSession configured (Metering YUV + Still JPEG)")
                         onReady()
                     }
 
@@ -142,81 +193,418 @@ class TimelapseCameraEngine(private val context: Context) {
         }
     }
 
-    fun capturePhoto(targetFile: File, onComplete: (Boolean) -> Unit) {
+    private data class ExposureDecision(
+        val useManual: Boolean,
+        val iso: Int,
+        val exposureNs: Long,
+        val modeName: String
+    )
+
+    fun capturePhoto(
+        targetFile: File,
+        intervalSec: Int = 15,
+        isPreview: Boolean = false,
+        onComplete: (Boolean) -> Unit
+    ) {
+        if (!captureInProgressLock.tryAcquire()) {
+            Log.w(TAG, "Capture already in progress, skipping concurrent request")
+            onComplete(false)
+            return
+        }
+
+        val wrappedComplete: (Boolean) -> Unit = { success ->
+            captureInProgressLock.release()
+            onComplete(success)
+        }
+
         ensureCameraOpen(
             onReady = {
                 val session = captureSession
-                val reader = imageReader
+                val mReader = meteringReader
+                val jReader = imageReader
                 val device = cameraDevice
-                if (session == null || reader == null || device == null) {
-                    onComplete(false)
+                val handler = backgroundHandler
+                if (session == null || mReader == null || jReader == null || device == null || handler == null) {
+                    wrappedComplete(false)
                     return@ensureCameraOpen
                 }
 
-                try {
-                    reader.setOnImageAvailableListener({ ir ->
-                        val image = ir.acquireLatestImage()
-                        if (image != null) {
-                            try {
-                                val buffer = image.planes[0].buffer
-                                val bytes = ByteArray(buffer.remaining())
-                                buffer.get(bytes)
-
-                                // Save frame to session
-                                targetFile.parentFile?.mkdirs()
-                                FileOutputStream(targetFile).use { fos ->
-                                    fos.write(bytes)
-                                }
-
-                                // Update last_frame.jpg for CLI preview
-                                val lastFrame = StorageHelper.lastFrameFile
-                                lastFrame.parentFile?.mkdirs()
-                                FileOutputStream(lastFrame).use { fos ->
-                                    fos.write(bytes)
-                                }
-
-                                onComplete(true)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Failed saving image", e)
-                                onComplete(false)
-                            } finally {
-                                image.close()
-                            }
-                        } else {
-                            onComplete(false)
-                        }
-                    }, backgroundHandler)
-
-                    val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                        addTarget(reader.surface)
-                        set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-                        set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                        set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
-                        set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
-                        set(CaptureRequest.JPEG_QUALITY, 80.toByte())
-                    }
-
-                    session.capture(captureBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
-                        override fun onCaptureFailed(
-                            session: CameraCaptureSession,
-                            request: CaptureRequest,
-                            failure: CaptureFailure
-                        ) {
-                            Log.e(TAG, "Capture failed: ${failure.reason}")
-                            onComplete(false)
-                        }
-                    }, backgroundHandler)
-
-                } catch (e: Exception) {
-                    Log.e(TAG, "Exception during capture", e)
-                    onComplete(false)
-                }
+                runMeteringAndCapture(
+                    device = device,
+                    session = session,
+                    mReader = mReader,
+                    jReader = jReader,
+                    handler = handler,
+                    targetFile = targetFile,
+                    intervalSec = intervalSec,
+                    isPreview = isPreview,
+                    onComplete = wrappedComplete
+                )
             },
             onError = { err ->
                 Log.e(TAG, "Camera open error: $err")
-                onComplete(false)
+                wrappedComplete(false)
             }
         )
+    }
+
+    private fun runMeteringAndCapture(
+        device: CameraDevice,
+        session: CameraCaptureSession,
+        mReader: ImageReader,
+        jReader: ImageReader,
+        handler: Handler,
+        targetFile: File,
+        intervalSec: Int,
+        isPreview: Boolean,
+        onComplete: (Boolean) -> Unit
+    ) {
+        val meteringDone = AtomicBoolean(false)
+        var measuredIso = 200
+        var measuredExpNs = 33_333_333L
+        var lastAeState = CameraMetadata.CONTROL_AE_STATE_INACTIVE
+        var framesCount = 0
+        val meteringStartMs = System.currentTimeMillis()
+
+        val proceedToStillCapture = Runnable {
+            if (!meteringDone.compareAndSet(false, true)) return@Runnable
+            try {
+                session.stopRepeating()
+            } catch (e: Exception) {
+                // Ignore
+            }
+
+            val currentLuma = latestMeteringLuma
+            val decision = calculateSmartExposure(
+                autoIso = measuredIso,
+                autoExpNs = measuredExpNs,
+                aeState = lastAeState,
+                liveLuma = currentLuma,
+                intervalSec = intervalSec,
+                isPreview = isPreview
+            )
+
+            Log.i(
+                TAG,
+                "Metering [ISO=$measuredIso, Exp=${measuredExpNs / 1_000_000}ms, Luma=${String.format("%.1f", currentLuma)}, AE=$lastAeState] -> " +
+                    "Decision [Mode=${decision.modeName}, ISO=${decision.iso}, Exp=${decision.exposureNs / 1_000_000}ms]"
+            )
+
+            // Wait briefly for repeating pipeline to drain before firing still capture
+            handler.postDelayed({
+                fireStillCapture(
+                    device = device,
+                    session = session,
+                    jReader = jReader,
+                    handler = handler,
+                    targetFile = targetFile,
+                    decision = decision,
+                    onComplete = onComplete
+                )
+            }, 80L)
+        }
+
+        // Safety timeout for metering phase (600 ms)
+        handler.postDelayed(proceedToStillCapture, 600L)
+
+        try {
+            val meteringReq = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(mReader.surface)
+                set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            }
+
+            session.setRepeatingRequest(
+                meteringReq.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { measuredIso = it }
+                        result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { measuredExpNs = it }
+                        result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
+                        framesCount++
+
+                        val elapsed = System.currentTimeMillis() - meteringStartMs
+                        val converged = (lastAeState == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
+                            lastAeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
+
+                        if (framesCount >= 8 && (converged || elapsed >= 450L || framesCount >= 14)) {
+                            handler.removeCallbacks(proceedToStillCapture)
+                            proceedToStillCapture.run()
+                        }
+                    }
+                },
+                handler
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Metering request failed, falling back to direct capture", e)
+            handler.removeCallbacks(proceedToStillCapture)
+            proceedToStillCapture.run()
+        }
+    }
+
+    private fun calculateSmartExposure(
+        autoIso: Int,
+        autoExpNs: Long,
+        aeState: Int,
+        liveLuma: Double,
+        intervalSec: Int,
+        isPreview: Boolean
+    ): ExposureDecision {
+        // 1. Determine adaptive max exposure time based on interval
+        val maxAllowedSec = if (isPreview) {
+            // Keep interactive CLI preview responsive while still allowing up to 4.5s night shutter
+            (intervalSec - 1.5).coerceIn(2.0, 4.5)
+        } else {
+            // Reserve ~1.8s for metering + ISP readout + JPEG save
+            (intervalSec - 1.8).coerceIn(0.5, 14.0)
+        }
+        val adaptiveMaxExpNs = (maxAllowedSec * 1_000_000_000.0).toLong().coerceIn(minExpNs, maxExpNs)
+
+        // 2. Check if scene has enough light for normal AUTO mode (ISO <= 400 and bright luma)
+        val isBrightScene = (autoIso <= PREFERRED_ISO_CAP &&
+            liveLuma >= 55.0 &&
+            aeState != CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
+
+        if (isBrightScene) {
+            return ExposureDecision(
+                useManual = false,
+                iso = autoIso.coerceIn(minIso, maxIso),
+                exposureNs = autoExpNs.coerceIn(minExpNs, adaptiveMaxExpNs),
+                modeName = "AUTO"
+            )
+        }
+
+        // 3. Low-light / Night scene: calculate total light energy required
+        // Account for YUV black level pedestal (~6.0)
+        val effectiveLuma = (liveLuma - 6.0).coerceAtLeast(2.5)
+        val targetEffectiveLuma = 72.0 // Target comfortable indoor/night brightness (~78 raw luma)
+        val lumaBoost = if (effectiveLuma < targetEffectiveLuma) {
+            (targetEffectiveLuma / effectiveLuma).coerceIn(1.0, 20.0)
+        } else {
+            1.0
+        }
+
+        val measuredEv = autoIso.toDouble() * autoExpNs.toDouble()
+        val targetEv = measuredEv * lumaBoost
+
+        // 4. Keep ISO around 400 (or lower if only mildly dim) and extend shutter up to adaptiveMaxExpNs
+        val preferredIso = autoIso.coerceIn(200, PREFERRED_ISO_CAP)
+        val expAtPreferredIso = (targetEv / preferredIso.toDouble()).toLong()
+
+        if (expAtPreferredIso <= adaptiveMaxExpNs) {
+            return ExposureDecision(
+                useManual = true,
+                iso = preferredIso,
+                exposureNs = expAtPreferredIso.coerceIn(minExpNs, adaptiveMaxExpNs),
+                modeName = "NIGHT_LONG_EXP"
+            )
+        }
+
+        // Try at ISO 400 specifically if preferredIso was < 400
+        val expAt400 = (targetEv / PREFERRED_ISO_CAP.toDouble()).toLong()
+        if (expAt400 <= adaptiveMaxExpNs) {
+            return ExposureDecision(
+                useManual = true,
+                iso = PREFERRED_ISO_CAP,
+                exposureNs = expAt400.coerceIn(minExpNs, adaptiveMaxExpNs),
+                modeName = "NIGHT_LONG_EXP"
+            )
+        }
+
+        // 5. Extreme darkness: shutter is already maxed out at adaptiveMaxExpNs,
+        // so allow ISO to scale up from 400 up to maxIso (3200)
+        val finalExpNs = adaptiveMaxExpNs
+        val neededIso = (targetEv / finalExpNs.toDouble()).toInt().coerceIn(PREFERRED_ISO_CAP, maxIso)
+
+        return ExposureDecision(
+            useManual = true,
+            iso = neededIso,
+            exposureNs = finalExpNs,
+            modeName = "NIGHT_MAX_BOOST"
+        )
+    }
+
+    private fun fireStillCapture(
+        device: CameraDevice,
+        session: CameraCaptureSession,
+        jReader: ImageReader,
+        handler: Handler,
+        targetFile: File,
+        decision: ExposureDecision,
+        onComplete: (Boolean) -> Unit
+    ) {
+        val completed = AtomicBoolean(false)
+        var actualIso = decision.iso
+        var actualExpNs = decision.exposureNs
+
+        val finishOnce: (Boolean) -> Unit = { success ->
+            if (completed.compareAndSet(false, true)) {
+                onComplete(success)
+            }
+        }
+
+        try {
+            jReader.setOnImageAvailableListener({ ir ->
+                val image = try {
+                    ir.acquireLatestImage()
+                } catch (e: Exception) {
+                    null
+                }
+                if (image != null) {
+                    try {
+                        val buffer = image.planes[0].buffer
+                        val bytes = ByteArray(buffer.remaining())
+                        buffer.get(bytes)
+
+                        // Save frame to targetFile atomically
+                        targetFile.parentFile?.mkdirs()
+                        val tmpTarget = File(targetFile.parentFile, "${targetFile.name}.tmp")
+                        FileOutputStream(tmpTarget).use { fos ->
+                            fos.write(bytes)
+                            fos.fd.sync()
+                        }
+                        tmpTarget.renameTo(targetFile)
+
+                        // Update last_frame.jpg for CLI preview if targetFile wasn't already lastFrameFile
+                        val lastFrame = StorageHelper.lastFrameFile
+                        if (targetFile.absolutePath != lastFrame.absolutePath) {
+                            lastFrame.parentFile?.mkdirs()
+                            val tmpLast = File(lastFrame.parentFile, "${lastFrame.name}.tmp")
+                            FileOutputStream(tmpLast).use { fos ->
+                                fos.write(bytes)
+                                fos.fd.sync()
+                            }
+                            tmpLast.renameTo(lastFrame)
+                        }
+
+                        val jpegLuma = computeJpegLuma(bytes)
+                        StorageHelper.updateLastCaptureMeta(
+                            StorageHelper.CaptureMetadata(
+                                iso = actualIso,
+                                exposureNs = actualExpNs,
+                                luma = jpegLuma,
+                                mode = decision.modeName
+                            )
+                        )
+                        Log.i(
+                            TAG,
+                            "Saved frame: mode=${decision.modeName}, ISO=$actualIso, " +
+                                "Exp=${actualExpNs / 1_000_000}ms, JpegLuma=$jpegLuma"
+                        )
+
+                        finishOnce(true)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed saving image", e)
+                        finishOnce(false)
+                    } finally {
+                        image.close()
+                    }
+                } else {
+                    finishOnce(false)
+                }
+            }, handler)
+
+            val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                addTarget(jReader.surface)
+                set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+                set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+                set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_HIGH_QUALITY)
+                set(CaptureRequest.JPEG_QUALITY, 85.toByte())
+
+                if (decision.useManual) {
+                    set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                    set(CaptureRequest.SENSOR_SENSITIVITY, decision.iso)
+                    set(CaptureRequest.SENSOR_EXPOSURE_TIME, decision.exposureNs)
+                    set(CaptureRequest.SENSOR_FRAME_DURATION, decision.exposureNs)
+                    set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                } else {
+                    set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+                }
+            }
+
+            session.capture(captureBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { actualIso = it }
+                    result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { actualExpNs = it }
+                }
+
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CaptureFailure
+                ) {
+                    Log.e(TAG, "Capture failed: ${failure.reason}")
+                    finishOnce(false)
+                }
+            }, handler)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception during still capture", e)
+            finishOnce(false)
+        }
+    }
+
+    private fun computeYuvLuma(image: Image): Double {
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val width = image.width
+        val height = image.height
+        var sum = 0L
+        var count = 0
+        var y = 0
+        while (y < height) {
+            val rowOffset = y * rowStride
+            var x = 0
+            while (x < width) {
+                val idx = rowOffset + x * pixelStride
+                if (idx >= 0 && idx < buffer.limit()) {
+                    sum += (buffer.get(idx).toInt() and 0xFF)
+                    count++
+                }
+                x += 8
+            }
+            y += 8
+        }
+        return if (count > 0) sum.toDouble() / count.toDouble() else 0.0
+    }
+
+    private fun computeJpegLuma(jpegBytes: ByteArray): Int {
+        return try {
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = 16
+            }
+            val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, opts) ?: return 0
+            val w = bmp.width
+            val h = bmp.height
+            val pixels = IntArray(w * h)
+            bmp.getPixels(pixels, 0, w, 0, 0, w, h)
+            bmp.recycle()
+            if (pixels.isEmpty()) return 0
+            var sum = 0L
+            for (px in pixels) {
+                val r = (px shr 16) and 0xFF
+                val g = (px shr 8) and 0xFF
+                val b = px and 0xFF
+                sum += (299 * r + 587 * g + 114 * b) / 1000
+            }
+            (sum / pixels.size).toInt()
+        } catch (e: Exception) {
+            0
+        }
     }
 
     private fun closeCamera() {
@@ -226,6 +614,8 @@ class TimelapseCameraEngine(private val context: Context) {
             captureSession = null
             cameraDevice?.close()
             cameraDevice = null
+            meteringReader?.close()
+            meteringReader = null
             imageReader?.close()
             imageReader = null
         } catch (e: Exception) {
@@ -237,5 +627,6 @@ class TimelapseCameraEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "TimelapseCameraEngine"
+        private const val PREFERRED_ISO_CAP = 400
     }
 }

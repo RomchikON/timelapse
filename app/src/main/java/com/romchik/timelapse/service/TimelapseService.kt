@@ -73,22 +73,30 @@ class TimelapseService : Service() {
     private fun takePreviewSnapshot() {
         if (currentState == STATE_RECORDING) {
             serviceScope.launch {
-                cameraEngine?.capturePhoto(StorageHelper.lastFrameFile) { success ->
+                cameraEngine?.capturePhoto(
+                    targetFile = StorageHelper.lastFrameFile,
+                    intervalSec = intervalSec,
+                    isPreview = true
+                ) { success ->
                     Log.i(TAG, "Preview snapshot while recording: $success")
                 }
             }
             return
         }
 
-        wakeLock?.acquire(10_000L)
+        wakeLock?.acquire(20_000L)
         startForegroundNotification("Предпросмотр", "Делается снимок камеры...")
 
         serviceScope.launch {
             val completer = CompletableDeferred<Boolean>()
-            cameraEngine?.capturePhoto(StorageHelper.lastFrameFile) { success ->
+            cameraEngine?.capturePhoto(
+                targetFile = StorageHelper.lastFrameFile,
+                intervalSec = intervalSec,
+                isPreview = true
+            ) { success ->
                 completer.complete(success)
             }
-            val result = withTimeoutOrNull(8000L) { completer.await() } ?: false
+            val result = withTimeoutOrNull(16_000L) { completer.await() } ?: false
             Log.i(TAG, "Preview snapshot completed: $result")
 
             withContext(Dispatchers.Main) {
@@ -115,6 +123,7 @@ class TimelapseService : Service() {
         endTimeMs = if (durationMinutes > 0) startTimeMs + (durationMinutes * 60 * 1000L) else 0L
         currentSessionId = StorageHelper.generateSessionId()
         currentState = STATE_RECORDING
+        isRecordingActive = true
 
         wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24 hours max safeguard
 
@@ -140,7 +149,11 @@ class TimelapseService : Service() {
                 val targetFile = File(sessionDir, String.format(Locale.US, "frame_%05d.jpg", frameCount))
 
                 val captureCompleter = CompletableDeferred<Boolean>()
-                cameraEngine?.capturePhoto(targetFile) { success ->
+                cameraEngine?.capturePhoto(
+                    targetFile = targetFile,
+                    intervalSec = intervalSec,
+                    isPreview = false
+                ) { success ->
                     captureCompleter.complete(success)
                 }
 
@@ -159,6 +172,7 @@ class TimelapseService : Service() {
     }
 
     private fun stopRecording(andEncode: Boolean) {
+        isRecordingActive = false
         if (currentState != STATE_RECORDING && currentState != STATE_ENCODING) {
             return
         }
@@ -306,6 +320,7 @@ class TimelapseService : Service() {
     }
 
     override fun onDestroy() {
+        isRecordingActive = false
         recordingJob?.cancel()
         encodingJob?.cancel()
         serviceScope.cancel()
@@ -317,6 +332,9 @@ class TimelapseService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        @Volatile
+        var isRecordingActive: Boolean = false
+
         const val TAG = "TimelapseService"
         const val CHANNEL_ID = "timelapse_channel"
         const val NOTIFICATION_ID = 1001
