@@ -274,19 +274,30 @@ class TimelapseCameraEngine(private val context: Context) {
                 // Ignore
             }
 
-            val currentLuma = latestMeteringLuma
-            val decision = calculateSmartExposure(
-                autoIso = measuredIso,
-                autoExpNs = measuredExpNs,
-                aeState = lastAeState,
-                liveLuma = currentLuma,
-                intervalSec = intervalSec,
-                isPreview = isPreview
-            )
+            val userExpMode = StorageHelper.getExposureMode()
+            val decision = if (userExpMode == "CLASSIC" || userExpMode == "BASIC" || userExpMode == "AUTO") {
+                // Basic standard Android auto-exposure mode (no manual long shutter, no custom cap)
+                ExposureDecision(
+                    useManual = false,
+                    iso = measuredIso,
+                    exposureNs = measuredExpNs,
+                    modeName = "CLASSIC_AUTO"
+                )
+            } else {
+                val currentLuma = latestMeteringLuma
+                calculateSmartExposure(
+                    autoIso = measuredIso,
+                    autoExpNs = measuredExpNs,
+                    aeState = lastAeState,
+                    liveLuma = currentLuma,
+                    intervalSec = intervalSec,
+                    isPreview = isPreview
+                )
+            }
 
             Log.i(
                 TAG,
-                "Metering [ISO=$measuredIso, Exp=${measuredExpNs / 1_000_000}ms, Luma=${String.format("%.1f", currentLuma)}, AE=$lastAeState] -> " +
+                "Metering [ISO=$measuredIso, Exp=${measuredExpNs / 1_000_000}ms, Luma=${String.format("%.1f", latestMeteringLuma)}, AE=$lastAeState] -> " +
                     "Decision [Mode=${decision.modeName}, ISO=${decision.iso}, Exp=${decision.exposureNs / 1_000_000}ms]"
             )
 

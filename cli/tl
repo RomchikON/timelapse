@@ -66,6 +66,9 @@ def ensure_device():
             print("Убедитесь, что телефон подключен к домашнему Wi-Fi.")
             sys.exit(1)
 
+    # Ensure MIUI background permissions are active
+    adb_cmd("shell", "cmd appops set com.romchik.timelapse 10020 allow; cmd appops set com.romchik.timelapse 10021 allow; cmd appops set com.romchik.timelapse 10008 allow", timeout=3)
+
 def cmd_status():
     ensure_device()
     out, code = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
@@ -110,6 +113,7 @@ def cmd_status():
     interval = status_data.get("interval_sec", 15)
     duration_min = status_data.get("duration_minutes", 0)
     session_id = status_data.get("session_id", "—")
+    user_mode = status_data.get("user_exposure_mode", "SMART")
     exp_mode = status_data.get("exposure_mode", "AUTO")
     last_iso = status_data.get("last_iso", "—")
     last_exp_str = status_data.get("last_exposure_str", "—")
@@ -117,9 +121,12 @@ def cmd_status():
 
     exp_mode_ru = {
         "AUTO": "☀️ Авто (Дневной)",
+        "CLASSIC_AUTO": "📷 Базовый авто-режим (Без длинной выдержки)",
         "NIGHT_LONG_EXP": "🌙 Ночной (Длинная выдержка)",
         "NIGHT_MAX_BOOST": "🌌 Глубокая ночь (Макс. выдержка + ISO)"
     }.get(exp_mode, exp_mode)
+
+    user_mode_str = "Умный ночной (Smart)" if user_mode == "SMART" else "Базовый авто (Classic)"
 
     state_color = C_GREEN if state == "IDLE" else (C_RED if state == "RECORDING" else C_YELLOW)
     state_ru = {
@@ -138,6 +145,7 @@ def cmd_status():
     print(f"Интервал съемки:     {interval} сек")
     dur_str = "Без лимита" if duration_min == 0 else f"{duration_min // 60} ч {duration_min % 60} мин"
     print(f"Таймер сессии:       {dur_str}")
+    print(f"Настройка камеры:    {C_CYAN}{user_mode_str}{C_RESET}")
     print(f"Режим экспозиции:    {C_MAGENTA}{exp_mode_ru}{C_RESET}")
     print(f"Последний кадр:      ISO {last_iso} | Выдержка {last_exp_str} | Яркость {last_luma}/255")
     charge_icon = "⚡" if charging else "🔋"
@@ -280,6 +288,37 @@ def cmd_pull(args):
         adb_cmd("pull", "/sdcard/Timelapse/videos/.", target_dir)
     print(f"{C_GREEN}Готово! Файлы сохранены в {target_dir}{C_RESET}")
 
+def cmd_mode(args):
+    ensure_device()
+    if not args:
+        st_out, _ = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
+        curr = "SMART"
+        if st_out.startswith("{"):
+            try:
+                curr = json.loads(st_out).get("user_exposure_mode", "SMART")
+            except:
+                pass
+        curr_desc = "Умный адаптивный (Smart)" if curr == "SMART" else "Базовый авто (Classic)"
+        print(f"Текущий режим: {C_BOLD}{C_CYAN}{curr_desc}{C_RESET}")
+        print("\nИспользование:")
+        print(f"  {C_CYAN}tl mode smart{C_RESET}     Включить умную длинную выдержку и контроль шума (ISO 400)")
+        print(f"  {C_CYAN}tl mode classic{C_RESET}   Включить базовый режим камеры (обычное авто)")
+        return
+
+    m = args[0].lower()
+    if m in ["smart", "night", "on", "1"]:
+        mode_val = "SMART"
+        mode_ru = "Умный адаптивный режим (длинная выдержка + антишум)"
+    elif m in ["classic", "basic", "auto", "off", "0"]:
+        mode_val = "CLASSIC"
+        mode_ru = "Базовый режим (стандартное авто)"
+    else:
+        print(f"{C_RED}Неизвестный режим: {args[0]}{C_RESET}. Выберите: smart или classic")
+        return
+
+    adb_cmd("shell", f"am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.SET_MODE --es mode {mode_val}")
+    print(f"{C_GREEN}Режим камеры изменен на:{C_RESET} {C_BOLD}{mode_ru}{C_RESET}")
+
 def cmd_logs():
     ensure_device()
     print(f"{C_CYAN}Показ логов таймлапса (Ctrl+C для выхода)...{C_RESET}")
@@ -294,6 +333,7 @@ def show_help():
   {C_CYAN}tl stop{C_RESET}                           Остановить съемку и собрать видео MP4
   {C_CYAN}tl schedule <09:00> <21:00> [15]{C_RESET}  Запланировать съемку с ... до ...
   {C_CYAN}tl preview{C_RESET}                        Сделать свежий снимок и открыть на экране ноутбука
+  {C_CYAN}tl mode [smart|classic]{C_RESET}           Переключить режим камеры: smart (выдержка) или classic (базовый)
   {C_CYAN}tl videos{C_RESET}                         Список готовых MP4 файлов на телефоне
   {C_CYAN}tl pull [файл|all]{C_RESET}                Скачать видео с телефона в ~/Videos/Timelapse/
   {C_CYAN}tl logs{C_RESET}                           Просмотр логов работы камеры в реальном времени
@@ -319,6 +359,8 @@ def main():
         cmd_schedule(args)
     elif cmd == "preview":
         cmd_preview()
+    elif cmd == "mode":
+        cmd_mode(args)
     elif cmd == "videos":
         cmd_videos()
     elif cmd == "pull":

@@ -33,6 +33,26 @@ object StorageHelper {
     @Volatile
     var lastCaptureMeta: CaptureMetadata = CaptureMetadata()
 
+    fun getExposureMode(): String {
+        return try {
+            val status = readStatus()
+            status?.optString("user_exposure_mode", "SMART") ?: "SMART"
+        } catch (e: Exception) {
+            "SMART"
+        }
+    }
+
+    fun setExposureMode(mode: String) {
+        try {
+            val existing = readStatus() ?: JSONObject()
+            existing.put("user_exposure_mode", mode.uppercase(Locale.US))
+            existing.put("last_updated", System.currentTimeMillis())
+            statusFile.writeText(existing.toString(2))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private val baseDir: File
         get() {
             val root = Environment.getExternalStorageDirectory()
@@ -126,6 +146,7 @@ object StorageHelper {
                 put("free_storage_gb", String.format(Locale.US, "%.1f", getAvailableStorageGb()))
                 put("scheduled_start", scheduledStart ?: "")
                 put("scheduled_end", scheduledEnd ?: "")
+                put("user_exposure_mode", getExposureMode())
                 put("last_iso", meta.iso)
                 put("last_exposure_ns", meta.exposureNs)
                 put("last_exposure_str", meta.exposureFormatted)

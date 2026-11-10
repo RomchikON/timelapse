@@ -65,6 +65,12 @@ class CommandReceiver : BroadcastReceiver() {
                 ContextCompat.startForegroundService(context, serviceIntent)
             }
 
+            "com.romchik.timelapse.SET_MODE" -> {
+                val mode = intent.getStringExtra("mode") ?: "SMART"
+                StorageHelper.setExposureMode(mode)
+                Log.i(TAG, "Exposure mode set to: $mode")
+            }
+
             "com.romchik.timelapse.CANCEL_SCHEDULE" -> {
                 cancelSchedule(context)
             }

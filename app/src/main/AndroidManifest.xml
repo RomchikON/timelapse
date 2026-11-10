@@ -56,6 +56,7 @@
                 <action android:name="com.romchik.timelapse.CANCEL_SCHEDULE" />
                 <action android:name="com.romchik.timelapse.ALARM_TRIGGER" />
                 <action android:name="com.romchik.timelapse.TAKE_SINGLE_PHOTO" />
+                <action android:name="com.romchik.timelapse.SET_MODE" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
