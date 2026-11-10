@@ -220,6 +220,7 @@ class TimelapseCameraEngine(private val context: Context) {
         }
 
         val wrappedComplete: (Boolean) -> Unit = { success ->
+            closeCamera()
             captureInProgressLock.release()
             onComplete(success)
         }
@@ -272,7 +273,6 @@ class TimelapseCameraEngine(private val context: Context) {
         var measuredIso = 200
         var measuredExpNs = 33_333_333L
         var lastAeState = CameraMetadata.CONTROL_AE_STATE_INACTIVE
-        var lastFocusDist = -1.0f
         var framesCount = 0
         val meteringStartMs = System.currentTimeMillis()
 
@@ -368,7 +368,6 @@ class TimelapseCameraEngine(private val context: Context) {
                         result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
                         result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { dist ->
                             if (dist >= 0f) {
-                                lastFocusDist = dist
                                 // Smooth focus distance using EMA filter (80% previous, 20% current)
                                 smoothedFocusDistance = if (smoothedFocusDistance < 0f) {
                                     dist
@@ -529,53 +528,63 @@ class TimelapseCameraEngine(private val context: Context) {
                     null
                 }
                 if (image != null) {
-                    try {
+                    val bytes = try {
                         val buffer = image.planes[0].buffer
-                        val bytes = ByteArray(buffer.remaining())
-                        buffer.get(bytes)
+                        ByteArray(buffer.remaining()).also { buffer.get(it) }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed reading image buffer", e)
+                        null
+                    } finally {
+                        try {
+                            image.close()
+                        } catch (_: Exception) {}
+                    }
 
-                        // Save frame to targetFile atomically
-                        targetFile.parentFile?.mkdirs()
-                        val tmpTarget = File(targetFile.parentFile, "${targetFile.name}.tmp")
-                        FileOutputStream(tmpTarget).use { fos ->
-                            fos.write(bytes)
-                            fos.fd.sync()
-                        }
-                        tmpTarget.renameTo(targetFile)
-
-                        // Update last_frame.jpg for CLI preview if targetFile wasn't already lastFrameFile
-                        val lastFrame = StorageHelper.lastFrameFile
-                        if (targetFile.absolutePath != lastFrame.absolutePath) {
-                            lastFrame.parentFile?.mkdirs()
-                            val tmpLast = File(lastFrame.parentFile, "${lastFrame.name}.tmp")
-                            FileOutputStream(tmpLast).use { fos ->
+                    if (bytes != null) {
+                        try {
+                            // Save frame to targetFile atomically
+                            targetFile.parentFile?.mkdirs()
+                            val tmpTarget = File(targetFile.parentFile, "${targetFile.name}.tmp")
+                            FileOutputStream(tmpTarget).use { fos ->
                                 fos.write(bytes)
                                 fos.fd.sync()
                             }
-                            tmpLast.renameTo(lastFrame)
-                        }
+                            tmpTarget.renameTo(targetFile)
 
-                        val jpegLuma = computeJpegLuma(bytes)
-                        StorageHelper.updateLastCaptureMeta(
-                            StorageHelper.CaptureMetadata(
-                                iso = actualIso,
-                                exposureNs = actualExpNs,
-                                luma = jpegLuma,
-                                mode = decision.modeName
+                            // Update last_frame.jpg for CLI preview if targetFile wasn't already lastFrameFile
+                            val lastFrame = StorageHelper.lastFrameFile
+                            if (targetFile.absolutePath != lastFrame.absolutePath) {
+                                lastFrame.parentFile?.mkdirs()
+                                val tmpLast = File(lastFrame.parentFile, "${lastFrame.name}.tmp")
+                                FileOutputStream(tmpLast).use { fos ->
+                                    fos.write(bytes)
+                                    fos.fd.sync()
+                                }
+                                tmpLast.renameTo(lastFrame)
+                            }
+
+                            val jpegLuma = computeJpegLuma(bytes)
+                            StorageHelper.updateLastCaptureMeta(
+                                StorageHelper.CaptureMetadata(
+                                    iso = actualIso,
+                                    exposureNs = actualExpNs,
+                                    luma = jpegLuma,
+                                    mode = decision.modeName
+                                )
                             )
-                        )
-                        Log.i(
-                            TAG,
-                            "Saved frame: mode=${decision.modeName}, ISO=$actualIso, " +
-                                "Exp=${actualExpNs / 1_000_000}ms, JpegLuma=$jpegLuma"
-                        )
+                            Log.i(
+                                TAG,
+                                "Saved frame: mode=${decision.modeName}, ISO=$actualIso, " +
+                                    "Exp=${actualExpNs / 1_000_000}ms, JpegLuma=$jpegLuma"
+                            )
 
-                        finishOnce(true)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed saving image", e)
+                            finishOnce(true)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed saving image", e)
+                            finishOnce(false)
+                        }
+                    } else {
                         finishOnce(false)
-                    } finally {
-                        image.close()
                     }
                 } else {
                     finishOnce(false)

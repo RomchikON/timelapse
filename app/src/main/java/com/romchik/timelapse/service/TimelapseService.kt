@@ -18,6 +18,7 @@ import com.romchik.timelapse.utils.StorageHelper
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.Locale
+import kotlin.coroutines.resume
 
 class TimelapseService : Service() {
 
@@ -27,6 +28,7 @@ class TimelapseService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var cameraEngine: TimelapseCameraEngine? = null
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private var currentState = STATE_IDLE
     private var isDailyMode = false
@@ -152,8 +154,6 @@ class TimelapseService : Service() {
         currentState = STATE_RECORDING
         isRecordingActive = true
 
-        wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24 hours max safeguard
-
         startForegroundNotification("Таймлапс активен", "Кадров: 0")
 
         broadcastStatus()
@@ -199,6 +199,10 @@ class TimelapseService : Service() {
                 val frameStart = System.currentTimeMillis()
                 val targetFile = File(sessionDir, String.format(Locale.US, "frame_%05d.jpg", frameCount))
 
+                // Acquire short-lived WakeLock ONLY for the duration of frame capture
+                val maxCaptureWakeMs = ((intervalSec + 20) * 1000L).coerceIn(25_000L, 60_000L)
+                acquireWakeLock(maxCaptureWakeMs)
+
                 val captureCompleter = CompletableDeferred<Boolean>()
                 cameraEngine?.capturePhoto(
                     targetFile = targetFile,
@@ -217,7 +221,14 @@ class TimelapseService : Service() {
 
                 val elapsed = System.currentTimeMillis() - frameStart
                 val remainingSleep = (intervalSec * 1000L - elapsed).coerceAtLeast(100L)
-                delay(remainingSleep)
+
+                if (remainingSleep > 1200L) {
+                    // Release WakeLock so the CPU and SoC can sleep between frames
+                    releaseWakeLock()
+                    sleepWithExactAlarm(remainingSleep)
+                } else {
+                    delay(remainingSleep)
+                }
             }
         }
     }
@@ -225,6 +236,11 @@ class TimelapseService : Service() {
     private fun stopRecording(andEncode: Boolean) {
         isRecordingActive = false
         if (currentState != STATE_RECORDING && currentState != STATE_ENCODING) {
+            currentState = STATE_IDLE
+            broadcastStatus()
+            releaseWakeLock()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
             return
         }
 
@@ -312,6 +328,7 @@ class TimelapseService : Service() {
         }
 
         currentState = STATE_ENCODING
+        acquireWakeLock(15 * 60 * 1000L) // Keep CPU awake during MP4 encoding
         broadcastStatus()
         updateNotification("Сборка MP4 видео...")
 
@@ -422,6 +439,17 @@ class TimelapseService : Service() {
             .build()
     }
 
+    private fun acquireWakeLock(timeoutMs: Long) {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            wakeLock?.acquire(timeoutMs)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private fun releaseWakeLock() {
         try {
             if (wakeLock?.isHeld == true) {
@@ -429,6 +457,54 @@ class TimelapseService : Service() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private suspend fun sleepWithExactAlarm(sleepMs: Long) {
+        if (sleepMs <= 0L) return
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val triggerAtElapsed = android.os.SystemClock.elapsedRealtime() + sleepMs
+
+        suspendCancellableCoroutine<Unit> { cont ->
+            val resumed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val listener = AlarmManager.OnAlarmListener {
+                // Re-acquire WakeLock immediately inside Alarm callback while system alarm lock is held
+                acquireWakeLock(35_000L)
+                if (resumed.compareAndSet(false, true) && cont.isActive) {
+                    cont.resume(Unit)
+                }
+            }
+
+            val fallbackRunnable = Runnable {
+                acquireWakeLock(35_000L)
+                try {
+                    alarmManager.cancel(listener)
+                } catch (_: Exception) {}
+                if (resumed.compareAndSet(false, true) && cont.isActive) {
+                    cont.resume(Unit)
+                }
+            }
+
+            try {
+                alarmManager.setExact(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAtElapsed,
+                    "Timelapse::FrameWakeup",
+                    listener,
+                    mainHandler
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "AlarmManager.setExact failed, using handler fallback: ${e.message}")
+            }
+
+            mainHandler.postDelayed(fallbackRunnable, sleepMs + 250L)
+
+            cont.invokeOnCancellation {
+                mainHandler.removeCallbacks(fallbackRunnable)
+                try {
+                    alarmManager.cancel(listener)
+                } catch (_: Exception) {}
+            }
         }
     }
 
