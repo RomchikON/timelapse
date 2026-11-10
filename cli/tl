@@ -73,7 +73,10 @@ def ensure_device():
     DEVICE_SERIAL = get_active_device()
     out, code = adb_cmd("get-state", timeout=3)
     if code != 0 or out != "device":
-        subprocess.run([ADB_BIN, "connect", "192.168.31.216:5555"], capture_output=True, timeout=8)
+        try:
+            subprocess.run([ADB_BIN, "connect", "192.168.31.216:5555"], capture_output=True, timeout=8)
+        except Exception:
+            pass
         time.sleep(0.5)
         DEVICE_SERIAL = get_active_device()
         out, code = adb_cmd("get-state", timeout=5)
@@ -251,41 +254,59 @@ def cmd_preview(args):
         except ValueError:
             pass
 
-    cap_msg = f" (макс. выдержка: {custom_max_exp} сек)" if custom_max_exp else " (базовый лимит: 4.5 сек)"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     os.makedirs(PREVIEWS_DIR, exist_ok=True)
     save_path = os.path.join(PREVIEWS_DIR, f"preview_{timestamp}.jpg")
     root_preview = os.path.join(PROJECT_DIR, "preview.jpg")
-    print(f"{C_CYAN}Делаю свежий снимок с камеры (автозамер + адаптивная выдержка){cap_msg}...{C_RESET}")
 
-    # Remove old last_frame.jpg so we know when the new frame is written
-    adb_cmd("shell", "rm -f /sdcard/Timelapse/last_frame.jpg", timeout=3)
+    # Check if a timelapse session is currently recording
+    st_out, _ = adb_cmd("shell", "cat /sdcard/Timelapse/status.json 2>/dev/null", timeout=3)
+    is_recording = False
+    if st_out.startswith("{"):
+        try:
+            is_recording = json.loads(st_out).get("state") == "RECORDING"
+        except Exception:
+            pass
 
-    # Wake screen / launch preview
-    adb_cmd("shell", "input keyevent KEYCODE_WAKEUP", timeout=3)
-    extra_arg = f" --ef max_exposure_sec {custom_max_exp}" if custom_max_exp else ""
-    adb_cmd("shell", f"am start -n com.romchik.timelapse/.ui.MainActivity --ez take_preview true --ez close_after_preview true{extra_arg}")
+    # If already recording and no custom override requested, grab the live frame without interrupting camera
+    if is_recording and not custom_max_exp:
+        print(f"{C_CYAN}Получаю свежий кадр из идущей съемки...{C_RESET}")
+        out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", save_path, timeout=6)
+        if code != 0 or not os.path.exists(save_path):
+            print(f"{C_RED}Не удалось скачать снимок с камеры.{C_RESET}")
+            return
+    else:
+        cap_msg = f" (макс. выдержка: {custom_max_exp} сек)" if custom_max_exp else " (базовый лимит: 4.5 сек)"
+        print(f"{C_CYAN}Делаю свежий снимок с камеры (автозамер + адаптивная выдержка){cap_msg}...{C_RESET}")
 
-    # Wait for frame (up to custom_max_exp + 10s)
-    max_wait = int((custom_max_exp or 4.5) + 12) * 2
-    ready = False
-    for _ in range(max_wait):
-        time.sleep(0.5)
-        out, code = adb_cmd("shell", "[ -s /sdcard/Timelapse/last_frame.jpg ] && echo READY", timeout=3)
-        if code == 0 and "READY" in out:
-            ready = True
-            break
+        # Remove old last_frame.jpg so we know when the new frame is written
+        adb_cmd("shell", "rm -f /sdcard/Timelapse/last_frame.jpg", timeout=3)
 
-    adb_cmd("shell", "input keyevent KEYCODE_SLEEP", timeout=3)
+        # Wake screen / launch preview
+        adb_cmd("shell", "input keyevent KEYCODE_WAKEUP", timeout=3)
+        extra_arg = f" --ef max_exposure_sec {custom_max_exp}" if custom_max_exp else ""
+        adb_cmd("shell", f"am start -n com.romchik.timelapse/.ui.MainActivity --ez take_preview true --ez close_after_preview true{extra_arg}")
 
-    if not ready:
-        print(f"{C_RED}Таймаут ожидания снимка с камеры.{C_RESET}")
-        return
+        # Wait for frame (up to custom_max_exp + 10s)
+        max_wait = int((custom_max_exp or 4.5) + 12) * 2
+        ready = False
+        for _ in range(max_wait):
+            time.sleep(0.5)
+            out, code = adb_cmd("shell", "[ -s /sdcard/Timelapse/last_frame.jpg ] && echo READY", timeout=3)
+            if code == 0 and "READY" in out:
+                ready = True
+                break
 
-    out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", save_path, timeout=6)
-    if code != 0 or not os.path.exists(save_path):
-        print(f"{C_RED}Не удалось скачать снимок с камеры.{C_RESET}")
-        return
+        adb_cmd("shell", "input keyevent KEYCODE_SLEEP", timeout=3)
+
+        if not ready:
+            print(f"{C_RED}Таймаут ожидания снимка с камеры.{C_RESET}")
+            return
+
+        out, code = adb_cmd("pull", "/sdcard/Timelapse/last_frame.jpg", save_path, timeout=6)
+        if code != 0 or not os.path.exists(save_path):
+            print(f"{C_RED}Не удалось скачать снимок с камеры.{C_RESET}")
+            return
 
     # Keep a copy as preview.jpg in root
     try:
