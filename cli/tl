@@ -356,6 +356,10 @@ def cmd_pull(args):
         print(f"Скачиваю на компьютер в {target_dir}...")
         adb_cmd("pull", found_snap, target_dir)
         print(f"{C_GREEN}Готово! Файл сохранен: {os.path.join(target_dir, snap_name)}{C_RESET}")
+        
+        # Clean up the temporary snap video on phone so it doesn't take storage
+        adb_cmd("shell", f"rm -f '{found_snap}'", timeout=3)
+        print(f"{C_CYAN}Временный snap-файл на телефоне удален, память чиста.{C_RESET}")
         print(f"{C_YELLOW}Съемка на телефоне продолжается в штатном режиме без потери кадров.{C_RESET}")
         return
 
