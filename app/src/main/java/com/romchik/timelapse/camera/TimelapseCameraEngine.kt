@@ -43,6 +43,9 @@ class TimelapseCameraEngine(private val context: Context) {
     @Volatile
     private var smoothedTargetEv: Double = 0.0
 
+    @Volatile
+    private var smoothedFocusDistance: Float = -1.0f
+
     init {
         findBackCamera()
     }
@@ -269,6 +272,7 @@ class TimelapseCameraEngine(private val context: Context) {
         var measuredIso = 200
         var measuredExpNs = 33_333_333L
         var lastAeState = CameraMetadata.CONTROL_AE_STATE_INACTIVE
+        var lastFocusDist = -1.0f
         var framesCount = 0
         val meteringStartMs = System.currentTimeMillis()
 
@@ -333,6 +337,7 @@ class TimelapseCameraEngine(private val context: Context) {
                     handler = handler,
                     targetFile = targetFile,
                     decision = decision,
+                    targetFocusDist = if (smoothedFocusDistance >= 0f) smoothedFocusDistance else null,
                     onComplete = onComplete
                 )
             }, 80L)
@@ -361,6 +366,17 @@ class TimelapseCameraEngine(private val context: Context) {
                         result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { measuredIso = it }
                         result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { measuredExpNs = it }
                         result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
+                        result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { dist ->
+                            if (dist >= 0f) {
+                                lastFocusDist = dist
+                                // Smooth focus distance using EMA filter (80% previous, 20% current)
+                                smoothedFocusDistance = if (smoothedFocusDistance < 0f) {
+                                    dist
+                                } else {
+                                    smoothedFocusDistance * 0.80f + dist * 0.20f
+                                }
+                            }
+                        }
                         framesCount++
 
                         val elapsed = System.currentTimeMillis() - meteringStartMs
@@ -492,6 +508,7 @@ class TimelapseCameraEngine(private val context: Context) {
         handler: Handler,
         targetFile: File,
         decision: ExposureDecision,
+        targetFocusDist: Float? = null,
         onComplete: (Boolean) -> Unit
     ) {
         val completed = AtomicBoolean(false)
@@ -568,11 +585,17 @@ class TimelapseCameraEngine(private val context: Context) {
             val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(jReader.surface)
                 set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
                 set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY)
                 set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_HIGH_QUALITY)
                 set(CaptureRequest.JPEG_QUALITY, 85.toByte())
+
+                if (targetFocusDist != null && targetFocusDist >= 0f) {
+                    set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                    set(CaptureRequest.LENS_FOCUS_DISTANCE, targetFocusDist)
+                } else {
+                    set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                }
 
                 if (decision.useManual) {
                     set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
