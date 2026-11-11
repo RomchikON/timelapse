@@ -61,6 +61,7 @@ class TimelapseCameraEngine(private val context: Context) {
     private var smoothedFocusDistance: Float = -1.0f
 
     init {
+        smoothedFocusDistance = StorageHelper.getSavedFocusDistance()
         findBackCamera()
     }
 
@@ -352,12 +353,15 @@ class TimelapseCameraEngine(private val context: Context) {
                     "Decision [Mode=${decision.modeName}, ISO=${decision.iso}, Exp=${decision.exposureNs / 1_000_000}ms]"
             )
 
-            // In lit room/daylight, let hardware AF run continuously for maximum sharpness.
-            // Only in deep darkness (luma < 18.0), lock the lens to the last known sharp focus distance.
-            val focusDist = if (latestMeteringLuma < 18.0 && smoothedFocusDistance >= 0f) {
+            // Stable Room Hyperfocal Lock:
+            // The camera is stationary on a tripod/shelf. To completely eliminate AF hunting,
+            // lens flutter, and dark blur, we ALWAYS lock the lens to the calibrated room distance
+            // during still capture. Default hyperfocal baseline is ~0.65 diopters (~1.54m), covering
+            // everything from 0.85m to infinity.
+            val focusDist = if (smoothedFocusDistance in 0.25f..1.50f) {
                 smoothedFocusDistance
             } else {
-                null
+                0.65f
             }
 
             // Wait briefly for repeating pipeline to drain before firing still capture
@@ -400,14 +404,20 @@ class TimelapseCameraEngine(private val context: Context) {
                         result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { measuredExpNs = it }
                         result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
 
-                        // Track natural focus distance in lit scenes so we have an accurate value for night freeze
+                        // Track and refine natural focus distance whenever lighting allows AF to lock
+                        val afState = result.get(CaptureResult.CONTROL_AF_STATE)
+                        val afLocked = (afState == CameraMetadata.CONTROL_AF_STATE_PASSIVE_FOCUSED ||
+                            afState == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED)
                         result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { dist ->
-                            if (dist >= 0f && latestMeteringLuma >= 18.0) {
-                                smoothedFocusDistance = if (smoothedFocusDistance < 0f) {
+                            // Update only when distance is realistic for room/landscape [0.25..1.50 diopters]
+                            // and AF confirms sharp focus (or sufficient daylight luma >= 35)
+                            if (dist in 0.25f..1.50f && (afLocked || latestMeteringLuma >= 45.0)) {
+                                smoothedFocusDistance = if (smoothedFocusDistance !in 0.25f..1.50f) {
                                     dist
                                 } else {
-                                    smoothedFocusDistance * 0.80f + dist * 0.20f
+                                    smoothedFocusDistance * 0.85f + dist * 0.15f
                                 }
+                                StorageHelper.saveFocusDistance(smoothedFocusDistance)
                             }
                         }
                         framesCount++

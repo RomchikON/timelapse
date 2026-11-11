@@ -99,6 +99,27 @@ object StorageHelper {
         return SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
     }
 
+    fun getSavedFocusDistance(): Float {
+        return try {
+            val status = readStatus()
+            val saved = status?.optDouble("saved_focus_dist", 0.65) ?: 0.65
+            saved.toFloat().coerceIn(0.25f, 1.50f)
+        } catch (e: Exception) {
+            0.65f
+        }
+    }
+
+    fun saveFocusDistance(dist: Float) {
+        if (dist < 0.25f || dist > 1.50f) return
+        try {
+            val existing = readStatus() ?: JSONObject()
+            existing.put("saved_focus_dist", dist.toDouble())
+            statusFile.writeText(existing.toString(2))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     fun generateDailySessionId(): String {
         return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
     }
