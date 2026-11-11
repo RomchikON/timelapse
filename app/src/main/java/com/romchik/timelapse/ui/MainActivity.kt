@@ -31,7 +31,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
-    private var selectedIntervalSec = 15
+    private var selectedIntervalSec = 10
     private var selectedDurationMinutes = 0 // 0 = unlimited
     private var isScheduleMode = false
     private var scheduleStart = "09:00"
@@ -78,7 +78,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun handlePreviewIntent(intent: Intent?) {
         if (intent?.getBooleanExtra("start_recording", false) == true) {
-            val interval = intent.getIntExtra("interval", 15)
+            val interval = intent.getIntExtra("interval", 10)
             val duration = intent.getIntExtra("duration", 0)
             val delJpegs = intent.getBooleanExtra("delete_jpegs", true)
             val daily = intent.getBooleanExtra("daily_mode", false)

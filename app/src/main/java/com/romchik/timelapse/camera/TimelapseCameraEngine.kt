@@ -155,7 +155,7 @@ class TimelapseCameraEngine(private val context: Context) {
                 }, backgroundHandler)
             }
 
-            imageReader = ImageReader.newInstance(1280, 720, ImageFormat.JPEG, 2)
+            imageReader = ImageReader.newInstance(1920, 1080, ImageFormat.JPEG, 2)
 
             cameraManager.openCamera(targetId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
@@ -498,8 +498,8 @@ class TimelapseCameraEngine(private val context: Context) {
             // Default 4.5s preview limit unless user specified custom cap
             (intervalSec - 1.5).coerceIn(2.0, 4.5)
         } else {
-            // Reserve ~1.8s for metering + ISP readout + JPEG save
-            (intervalSec - 1.8).coerceIn(0.5, 30.0)
+            // Reserve ~2.0s for metering + 1080p ISP readout + JPEG save
+            (intervalSec - 2.0).coerceIn(0.5, 30.0)
         }
 
         val maxAllowedSec = if (maxExposureCapSec != null && maxExposureCapSec > 0.1) {

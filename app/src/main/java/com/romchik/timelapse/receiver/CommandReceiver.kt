@@ -20,7 +20,7 @@ class CommandReceiver : BroadcastReceiver() {
 
         when (action) {
             "com.romchik.timelapse.START" -> {
-                val interval = intent.getIntExtra("interval", 15)
+                val interval = intent.getIntExtra("interval", 10)
                 val duration = intent.getIntExtra("duration", 0)
                 val delJpegs = intent.getBooleanExtra("delete_jpegs", true)
                 val daily = intent.getBooleanExtra("daily_mode", false)
@@ -58,7 +58,7 @@ class CommandReceiver : BroadcastReceiver() {
             "com.romchik.timelapse.SCHEDULE" -> {
                 val start = intent.getStringExtra("start") ?: "09:00"
                 val end = intent.getStringExtra("end") ?: "21:00"
-                val interval = intent.getIntExtra("interval", 15)
+                val interval = intent.getIntExtra("interval", 10)
                 val delJpegs = intent.getBooleanExtra("delete_jpegs", true)
 
                 scheduleTimelapse(context, start, end, interval, delJpegs)
@@ -84,7 +84,7 @@ class CommandReceiver : BroadcastReceiver() {
             "com.romchik.timelapse.ALARM_TRIGGER" -> {
                 val subAction = intent.getStringExtra("sub_action") ?: "START"
                 if (subAction == "START") {
-                    val interval = intent.getIntExtra("interval", 15)
+                    val interval = intent.getIntExtra("interval", 10)
                     val durationMin = intent.getIntExtra("duration", 0)
                     val delJpegs = intent.getBooleanExtra("delete_jpegs", true)
 

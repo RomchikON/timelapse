@@ -35,7 +35,7 @@ class TimelapseService : Service() {
     private var dailyRotationHour = 4
     private var lastRotationDay = -1
     private var currentSessionId: String? = null
-    private var intervalSec = 15
+    private var intervalSec = 10
     private var durationMinutes = 0
     private var deleteJpegs = true
     private var frameCount = 0
@@ -332,10 +332,10 @@ class TimelapseService : Service() {
                 context = this@TimelapseService,
                 sessionDir = sessionDir,
                 outputVideoFile = outputFile,
-                width = 1280,
-                height = 720,
+                width = 1920,
+                height = 1080,
                 frameRate = 30,
-                bitRate = 8_000_000,
+                bitRate = 14_000_000,
                 deleteJpegsAfterSuccess = deleteJpegs,
                 onProgress = { current, total ->
                     if (current % 100 == 0 || current == total) {
@@ -364,10 +364,10 @@ class TimelapseService : Service() {
                     context = this@TimelapseService,
                     sessionDir = sessionDir,
                     outputVideoFile = tmpFile,
-                    width = 1280,
-                    height = 720,
+                    width = 1920,
+                    height = 1080,
                     frameRate = 30,
-                    bitRate = 8_000_000,
+                    bitRate = 14_000_000,
                     deleteJpegsAfterSuccess = false, // NEVER delete frames during live snapshot!
                     onProgress = { current, total ->
                         if (current % 150 == 0 || current == total) {
@@ -400,10 +400,10 @@ class TimelapseService : Service() {
                 context = this@TimelapseService,
                 sessionDir = sessionDir,
                 outputVideoFile = outputFile,
-                width = 1280,
-                height = 720,
+                width = 1920,
+                height = 1080,
                 frameRate = 30,
-                bitRate = 8_000_000,
+                bitRate = 14_000_000,
                 deleteJpegsAfterSuccess = deleteJpegs,
                 onProgress = { current, total ->
                     updateNotification("Сборка MP4: $current/$total")

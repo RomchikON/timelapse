@@ -27,10 +27,10 @@ object VideoEncoder {
         context: Context,
         sessionDir: File,
         outputVideoFile: File,
-        width: Int = 1280,
-        height: Int = 720,
+        width: Int = 1920,
+        height: Int = 1080,
         frameRate: Int = 30,
-        bitRate: Int = 8_000_000,
+        bitRate: Int = 14_000_000,
         deleteJpegsAfterSuccess: Boolean = true,
         onProgress: ((Int, Int) -> Unit)? = null
     ): Boolean {
@@ -98,13 +98,15 @@ object VideoEncoder {
                 if (bitmap != null) {
                     try {
                         val timeText = dateFormat.format(Date(file.lastModified()))
-                        val textWidth = textPaint.measureText(timeText)
+                        val scale = bitmap.width.toFloat() / 1280f
+                        textPaint.textSize = 24f * scale
                         val fontMetrics = textPaint.fontMetrics
+                        val textWidth = textPaint.measureText(timeText)
                         val textHeight = fontMetrics.descent - fontMetrics.ascent
 
-                        val padX = 12f
-                        val padY = 6f
-                        val margin = 20f
+                        val padX = 12f * scale
+                        val padY = 6f * scale
+                        val margin = 20f * scale
                         val bW = bitmap.width.toFloat()
                         val bH = bitmap.height.toFloat()
 
@@ -115,7 +117,7 @@ object VideoEncoder {
                             bH - margin
                         )
                         val canvas = Canvas(bitmap)
-                        canvas.drawRoundRect(bgRect, 8f, 8f, bgPaint)
+                        canvas.drawRoundRect(bgRect, 8f * scale, 8f * scale, bgPaint)
                         val textX = bgRect.left + padX
                         val textY = bgRect.bottom - padY - fontMetrics.descent
                         canvas.drawText(timeText, textX, textY, textPaint)
