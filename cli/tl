@@ -451,9 +451,11 @@ def cmd_pull(args):
         adb_cmd("shell", f"am broadcast -n com.romchik.timelapse/.receiver.CommandReceiver -a com.romchik.timelapse.ENCODE --ez is_snapshot true --es session_id '{curr_session}'")
 
         # Wait for snapshot video to appear in /sdcard/Timelapse/videos/
-        print("Кодирую видео на процессоре телефона...")
+        est_sec = max(5, int(frames_count / 20))
+        max_wait = max(180, int(frames_count / 8) + 60)
+        print(f"Кодирую видео на процессоре телефона (~{est_sec} сек для {frames_count} кадров)...")
         found_snap = None
-        for _ in range(60):
+        for sec in range(1, max_wait + 1):
             time.sleep(1.0)
             v_out, _ = adb_cmd("shell", f"ls -t /sdcard/Timelapse/videos/*{curr_session}*_snap_*.mp4 2>/dev/null", timeout=3)
             lines = [l.strip() for l in v_out.splitlines() if l.strip().endswith(".mp4") and not l.strip().endswith(".tmp")]
@@ -461,15 +463,17 @@ def cmd_pull(args):
             if new_snaps:
                 found_snap = new_snaps[0]
                 break
+            if sec % 10 == 0:
+                print(f"  ...идет сборка MP4 ({sec} сек)...")
 
         if not found_snap:
-            print(f"{C_RED}Не удалось сформировать промежуточное видео.{C_RESET}")
+            print(f"{C_RED}Не удалось сформировать промежуточное видео за {max_wait} сек.{C_RESET}")
             return
 
         snap_name = os.path.basename(found_snap)
         print(f"{C_GREEN}Промежуточное видео собрано:{C_RESET} {snap_name}")
         print(f"Скачиваю на компьютер в {target_dir}...")
-        adb_cmd("pull", found_snap, target_dir)
+        adb_cmd("pull", found_snap, target_dir, timeout=300)
         local_saved_file = os.path.join(target_dir, snap_name)
         file_size_mb = os.path.getsize(local_saved_file) / (1024 * 1024) if os.path.exists(local_saved_file) else 0
         print(f"{C_GREEN}Готово! Файл сохранен: {local_saved_file} ({file_size_mb:.2f} MB){C_RESET}")
@@ -483,10 +487,10 @@ def cmd_pull(args):
     if target_file and target_file != "all":
         phone_path = f"/sdcard/Timelapse/videos/{target_file}"
         print(f"Скачиваю {target_file} в {target_dir}...")
-        adb_cmd("pull", phone_path, target_dir)
+        adb_cmd("pull", phone_path, target_dir, timeout=300)
     else:
         print(f"Скачиваю все видео в {target_dir}...")
-        adb_cmd("pull", "/sdcard/Timelapse/videos/.", target_dir)
+        adb_cmd("pull", "/sdcard/Timelapse/videos/.", target_dir, timeout=300)
     print(f"{C_GREEN}Готово! Файлы сохранены в {target_dir}{C_RESET}")
 
 def cmd_mode(args):
