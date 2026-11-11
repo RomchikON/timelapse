@@ -480,12 +480,15 @@ class TimelapseCameraEngine(private val context: Context) {
         }
         val adaptiveMaxExpNs = (maxAllowedSec * 1_000_000_000.0).toLong().coerceIn(minExpNs, maxExpNs)
 
-        // 2. Check if scene has enough light for normal AUTO mode (ISO <= 400 and bright luma)
-        val isBrightScene = (autoIso <= PREFERRED_ISO_CAP &&
-            liveLuma >= 55.0 &&
-            aeState != CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
+        // 2. Daytime / Bright Scene Detection:
+        // When preview metering converges to a fast shutter (<= 35ms / ~1/28s) OR low ISO with reasonable EV,
+        // the scene has ample daylight. Hardware AE with daylightAeCompensation (-1.33 EV) perfectly
+        // protects window highlights from blowing out, eliminates motion blur, and tracks daylight smoothly.
+        val previewEv = autoIso.toDouble() * autoExpNs.toDouble()
+        val isDaylight = (autoExpNs <= 35_000_000L && autoIso <= 800) ||
+            (previewEv <= 25_000_000_000.0 && autoIso <= 500)
 
-        if (isBrightScene) {
+        if (isDaylight) {
             // Daylight AUTO: drop night filter state so the next night starts from a fresh estimate
             if (!isPreview) resetNightEvFilter()
             return ExposureDecision(
@@ -496,58 +499,62 @@ class TimelapseCameraEngine(private val context: Context) {
             )
         }
 
-        // 3. Low-light / Night scene: calculate total light energy required
+        // 3. Evening / Night scene: calculate total light energy required
         // Account for YUV black level pedestal (~6.0)
-        val effectiveLuma = (liveLuma - 6.0).coerceAtLeast(2.5)
-        val targetEffectiveLuma = 72.0 // Target comfortable indoor/night brightness (~78 raw luma)
+        val effectiveLuma = (liveLuma - 6.0).coerceAtLeast(2.0)
+        val targetEffectiveLuma = 68.0 // Target comfortable indoor/night brightness (~74 raw luma)
         val lumaBoost = if (effectiveLuma < targetEffectiveLuma) {
             (targetEffectiveLuma / effectiveLuma).coerceIn(1.0, 20.0)
         } else {
             1.0
         }
 
-        val measuredEv = autoIso.toDouble() * autoExpNs.toDouble()
-        val rawTargetEv = measuredEv * lumaBoost
+        val rawTargetEv = previewEv * lumaBoost
 
-        // Night anti-flicker: the dark metering preview is very noisy, so the raw EV estimate jitters
-        // from frame to frame. Median filter + slow smoothing + dead-band + slew-rate limit keep the
-        // applied exposure steady on a static scene. Previews bypass the filter (no state pollution).
+        // Night anti-flicker: the dark metering preview is noisy, so raw EV estimate jitters.
+        // Median filter + slow smoothing + dead-band + slew-rate limit keep applied exposure steady.
         val targetEv = if (isPreview) rawTargetEv else stabilizeNightEv(rawTargetEv)
 
-        // 4. In night/dim scene, prioritize keeping shutter fast (under ~1.8s) by scaling ISO up to 800
-        val targetExpNs = 1_800_000_000L.coerceAtMost(adaptiveMaxExpNs)
-        val isoForTargetExp = (targetEv / targetExpNs.toDouble()).toInt().coerceIn(200, PREFERRED_ISO_CAP)
-        val shutterAtIso = (targetEv / isoForTargetExp.toDouble()).toLong()
+        // 4. Indoor / Fast shutter ladder:
+        // Base shutter threshold for indoor / evening: 1/15s (66.7ms).
+        // If the scene can be properly exposed at <= 1/15s with ISO <= 800, keep shutter fast to avoid blur!
+        val fastShutterNs = 66_666_666L // 1/15 sec
+        val neededIsoAtFastShutter = (targetEv / fastShutterNs.toDouble()).toInt()
 
-        if (shutterAtIso <= adaptiveMaxExpNs) {
+        if (neededIsoAtFastShutter <= PREFERRED_ISO_CAP) {
+            val iso = neededIsoAtFastShutter.coerceIn(200, PREFERRED_ISO_CAP)
+            val shutterNs = (targetEv / iso.toDouble()).toLong().coerceIn(minExpNs, fastShutterNs)
             return ExposureDecision(
                 useManual = true,
-                iso = isoForTargetExp,
-                exposureNs = shutterAtIso.coerceIn(minExpNs, adaptiveMaxExpNs),
-                modeName = "NIGHT_LONG_EXP"
+                iso = iso,
+                exposureNs = shutterNs,
+                modeName = "INDOOR_FAST"
             )
         }
 
-        // Try at max ISO 800 specifically
-        val expAt800 = (targetEv / PREFERRED_ISO_CAP.toDouble()).toLong()
-        if (expAt800 <= adaptiveMaxExpNs) {
+        // 5. Twilight / Moderate Night:
+        // Keep ISO at 800 (cleanest low-light ISO), and smoothly extend shutter speed
+        // up to adaptiveMaxExpNs (e.g. 13s for 15s interval)
+        val neededExpAtIso800 = (targetEv / PREFERRED_ISO_CAP.toDouble()).toLong()
+
+        if (neededExpAtIso800 <= adaptiveMaxExpNs) {
             return ExposureDecision(
                 useManual = true,
                 iso = PREFERRED_ISO_CAP,
-                exposureNs = expAt800.coerceIn(minExpNs, adaptiveMaxExpNs),
+                exposureNs = neededExpAtIso800.coerceIn(fastShutterNs, adaptiveMaxExpNs),
                 modeName = "NIGHT_LONG_EXP"
             )
         }
 
-        // 5. Extreme darkness: shutter is already maxed out at adaptiveMaxExpNs,
-        // so allow ISO to scale up from 800 up to maxIso (3200)
-        val finalExpNs = adaptiveMaxExpNs
-        val neededIso = (targetEv / finalExpNs.toDouble()).toInt().coerceIn(PREFERRED_ISO_CAP, maxIso)
+        // 6. Deep Night / Pitch Black:
+        // Shutter is maxed out at adaptiveMaxExpNs, scale ISO up from 800 to maxIso (3200)
+        // to pull out all available light from extreme darkness.
+        val neededIso = (targetEv / adaptiveMaxExpNs.toDouble()).toInt().coerceIn(PREFERRED_ISO_CAP, maxIso)
 
         return ExposureDecision(
             useManual = true,
             iso = neededIso,
-            exposureNs = finalExpNs,
+            exposureNs = adaptiveMaxExpNs,
             modeName = "NIGHT_MAX_BOOST"
         )
     }
