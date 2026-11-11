@@ -174,6 +174,32 @@ object StorageHelper {
         }
     }
 
+    /** Persistent CSV diary of battery / power state and capture hiccups, survives restarts and Android stat resets. */
+    val batteryLogFile: File
+        get() = File(baseDir, "battery_log.csv")
+
+    private const val BATTERY_LOG_HEADER =
+        "time,level_pct,charging,plug,temp_c,voltage_mv,doze,power_save,frames,note"
+    private const val BATTERY_LOG_MAX_BYTES = 2L * 1024 * 1024
+
+    @Synchronized
+    fun appendBatteryLog(row: String) {
+        try {
+            val f = batteryLogFile
+            if (f.exists() && f.length() > BATTERY_LOG_MAX_BYTES) {
+                val old = File(f.parentFile, "battery_log.old.csv")
+                old.delete()
+                f.renameTo(old)
+            }
+            if (!f.exists() || f.length() == 0L) {
+                f.writeText(BATTERY_LOG_HEADER + "\n")
+            }
+            f.appendText(row + "\n")
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     fun getAvailableStorageGb(): Double {
         return try {
             val stat = StatFs(Environment.getExternalStorageDirectory().path)

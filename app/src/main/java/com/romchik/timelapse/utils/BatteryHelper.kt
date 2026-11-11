@@ -9,7 +9,10 @@ object BatteryHelper {
     data class BatteryInfo(
         val level: Int,
         val temperatureCelsius: Float,
-        val isCharging: Boolean
+        val isCharging: Boolean,
+        /** 0 = on battery, 1 = AC, 2 = USB, 4 = wireless */
+        val plugged: Int = 0,
+        val voltageMv: Int = 0
     )
 
     fun getBatteryInfo(context: Context): BatteryInfo {
@@ -27,6 +30,9 @@ object BatteryHelper {
         val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
 
-        return BatteryInfo(pct, tempCelsius, isCharging)
+        val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        val voltage = batteryIntent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0) ?: 0
+
+        return BatteryInfo(pct, tempCelsius, isCharging, plugged, voltage)
     }
 }

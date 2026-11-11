@@ -165,6 +165,10 @@ class TimelapseService : Service() {
 
         broadcastStatus()
 
+        prevFrameStartMs = 0L
+        lastDiaryCharging = null
+        logBatteryDiary("SESSION_START ${currentSessionId} resume_frame=$frameCount", force = true)
+
         recordingJob?.cancel()
         recordingJob = serviceScope.launch {
             var sessionDir = StorageHelper.getSessionDir(currentSessionId!!)
@@ -204,6 +208,18 @@ class TimelapseService : Service() {
                 }
 
                 val frameStart = System.currentTimeMillis()
+
+                // Diary: detect abnormally long gaps between frame starts (deep sleep, camera trouble, ...)
+                var logNote = ""
+                if (prevFrameStartMs > 0L) {
+                    val gapMs = frameStart - prevFrameStartMs
+                    if (gapMs > intervalSec * 2000L + 5000L) {
+                        logNote = "GAP ${gapMs / 1000}s (expected ${intervalSec}s)"
+                    }
+                }
+                prevFrameStartMs = frameStart
+                logBatteryDiary(logNote)
+
                 val targetFile = File(sessionDir, String.format(Locale.US, "frame_%05d.jpg", frameCount))
 
                 // Acquire short-lived WakeLock ONLY for the duration of frame capture
@@ -224,6 +240,8 @@ class TimelapseService : Service() {
                     frameCount++
                     updateNotification("Кадров: $frameCount (${getFormattedVideoDuration()})")
                     broadcastStatus()
+                } else {
+                    logBatteryDiary("CAPTURE_FAIL", force = true)
                 }
 
                 val elapsed = System.currentTimeMillis() - frameStart
@@ -237,6 +255,41 @@ class TimelapseService : Service() {
                     delay(remainingSleep)
                 }
             }
+        }
+    }
+
+    private var prevFrameStartMs = 0L
+    private var lastDiaryMs = 0L
+    private var lastDiaryCharging: Boolean? = null
+
+    /**
+     * Appends one row to battery_log.csv: at most once a minute, and immediately when the charger is
+     * plugged/unplugged or when there is a note (GAP / CAPTURE_FAIL / START).
+     */
+    private fun logBatteryDiary(note: String = "", force: Boolean = false) {
+        try {
+            val now = System.currentTimeMillis()
+            val b = BatteryHelper.getBatteryInfo(this)
+            val chargingChanged = lastDiaryCharging != null && lastDiaryCharging != b.isCharging
+            val finalNote = if (chargingChanged && note.isEmpty()) {
+                if (b.isCharging) "CHARGER_CONNECTED" else "CHARGER_DISCONNECTED"
+            } else note
+            if (!force && finalNote.isEmpty() && now - lastDiaryMs < 60_000L) return
+
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val time = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(java.util.Date(now))
+            val plug = when (b.plugged) { 0 -> "none"; 1 -> "ac"; 2 -> "usb"; 4 -> "wireless"; else -> b.plugged.toString() }
+            val row = listOf(
+                time, b.level, if (b.isCharging) 1 else 0, plug,
+                String.format(Locale.US, "%.1f", b.temperatureCelsius), b.voltageMv,
+                if (pm.isDeviceIdleMode) 1 else 0, if (pm.isPowerSaveMode) 1 else 0,
+                frameCount, "\"$finalNote\""
+            ).joinToString(",")
+            StorageHelper.appendBatteryLog(row)
+            lastDiaryMs = now
+            lastDiaryCharging = b.isCharging
+        } catch (e: Exception) {
+            Log.w(TAG, "Battery diary write failed", e)
         }
     }
 
