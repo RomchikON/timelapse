@@ -160,15 +160,11 @@ class CommandReceiver : BroadcastReceiver() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    startCal.timeInMillis,
-                    startPending
-                )
-            } else {
-                alarmManager.setExact(AlarmManager.RTC_WAKEUP, startCal.timeInMillis, startPending)
-            }
+            alarmManager.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                startCal.timeInMillis,
+                startPending
+            )
 
             Log.i(TAG, "Scheduled start at ${startCal.time} (duration: $durationMinutes min)")
         }

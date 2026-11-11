@@ -1,8 +1,10 @@
 package com.romchik.timelapse.service
 
 import android.app.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -42,11 +44,42 @@ class TimelapseService : Service() {
     private var startTimeMs = 0L
     private var endTimeMs = 0L
 
+    private val frameWakeContinuation = java.util.concurrent.atomic.AtomicReference<CancellableContinuation<Unit>?>(null)
+
+    private val wakePendingIntent by lazy {
+        val intent = Intent("com.romchik.timelapse.FRAME_WAKEUP").apply {
+            setPackage(packageName)
+        }
+        PendingIntent.getBroadcast(
+            this,
+            2002,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    private val frameWakeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            acquireWakeLock(35_000L)
+            frameWakeContinuation.getAndSet(null)?.let { cont ->
+                if (cont.isActive) {
+                    cont.resume(Unit)
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Timelapse::WakeLock")
+        val filter = IntentFilter("com.romchik.timelapse.FRAME_WAKEUP")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(frameWakeReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(frameWakeReceiver, filter)
+        }
         cameraEngine = TimelapseCameraEngine(this).apply { start() }
     }
 
@@ -526,43 +559,34 @@ class TimelapseService : Service() {
         val triggerAtElapsed = android.os.SystemClock.elapsedRealtime() + sleepMs
 
         suspendCancellableCoroutine<Unit> { cont ->
-            val resumed = java.util.concurrent.atomic.AtomicBoolean(false)
-            val listener = AlarmManager.OnAlarmListener {
-                // Re-acquire WakeLock immediately inside Alarm callback while system alarm lock is held
-                acquireWakeLock(35_000L)
-                if (resumed.compareAndSet(false, true) && cont.isActive) {
-                    cont.resume(Unit)
-                }
-            }
+            frameWakeContinuation.set(cont)
 
             val fallbackRunnable = Runnable {
                 acquireWakeLock(35_000L)
-                try {
-                    alarmManager.cancel(listener)
-                } catch (_: Exception) {}
-                if (resumed.compareAndSet(false, true) && cont.isActive) {
-                    cont.resume(Unit)
+                frameWakeContinuation.getAndSet(null)?.let { c ->
+                    if (c.isActive) {
+                        c.resume(Unit)
+                    }
                 }
             }
 
             try {
-                alarmManager.setExact(
+                alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
                     triggerAtElapsed,
-                    "Timelapse::FrameWakeup",
-                    listener,
-                    mainHandler
+                    wakePendingIntent
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "AlarmManager.setExact failed, using handler fallback: ${e.message}")
+                Log.w(TAG, "AlarmManager.setExactAndAllowWhileIdle failed, using handler fallback: ${e.message}")
             }
 
             mainHandler.postDelayed(fallbackRunnable, sleepMs + 250L)
 
             cont.invokeOnCancellation {
                 mainHandler.removeCallbacks(fallbackRunnable)
+                frameWakeContinuation.compareAndSet(cont, null)
                 try {
-                    alarmManager.cancel(listener)
+                    alarmManager.cancel(wakePendingIntent)
                 } catch (_: Exception) {}
             }
         }
@@ -574,6 +598,9 @@ class TimelapseService : Service() {
         encodingJob?.cancel()
         serviceScope.cancel()
         cameraEngine?.stop()
+        try {
+            unregisterReceiver(frameWakeReceiver)
+        } catch (_: Exception) {}
         releaseWakeLock()
         super.onDestroy()
     }
