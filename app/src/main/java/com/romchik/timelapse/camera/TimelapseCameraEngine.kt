@@ -352,8 +352,13 @@ class TimelapseCameraEngine(private val context: Context) {
                     "Decision [Mode=${decision.modeName}, ISO=${decision.iso}, Exp=${decision.exposureNs / 1_000_000}ms]"
             )
 
-            // Target focus distance: use smoothed distance or a calibrated indoor hyperfocal default (0.65 diopters ~1.54m)
-            val focusDist = if (smoothedFocusDistance >= 0f) smoothedFocusDistance else 0.65f
+            // In lit room/daylight, let hardware AF run continuously for maximum sharpness.
+            // Only in deep darkness (luma < 18.0), lock the lens to the last known sharp focus distance.
+            val focusDist = if (latestMeteringLuma < 18.0 && smoothedFocusDistance >= 0f) {
+                smoothedFocusDistance
+            } else {
+                null
+            }
 
             // Wait briefly for repeating pipeline to drain before firing still capture
             handler.postDelayed({
@@ -395,18 +400,13 @@ class TimelapseCameraEngine(private val context: Context) {
                         result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { measuredExpNs = it }
                         result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
 
-                        // Focus hunting protection in the dark:
-                        // Only update smoothed focus distance when there is adequate light and AF confirmed a solid lock
-                        val afState = result.get(CaptureResult.CONTROL_AF_STATE)
-                        val afLocked = (afState == CameraMetadata.CONTROL_AF_STATE_PASSIVE_FOCUSED ||
-                            afState == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED)
+                        // Track natural focus distance in lit scenes so we have an accurate value for night freeze
                         result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { dist ->
-                            if (dist >= 0f && latestMeteringLuma >= 22.0 && afLocked) {
-                                // Smooth focus distance using EMA filter (85% previous, 15% current)
+                            if (dist >= 0f && latestMeteringLuma >= 18.0) {
                                 smoothedFocusDistance = if (smoothedFocusDistance < 0f) {
                                     dist
                                 } else {
-                                    smoothedFocusDistance * 0.85f + dist * 0.15f
+                                    smoothedFocusDistance * 0.80f + dist * 0.20f
                                 }
                             }
                         }
