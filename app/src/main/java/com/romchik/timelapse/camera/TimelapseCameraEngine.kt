@@ -36,6 +36,11 @@ class TimelapseCameraEngine(private val context: Context) {
     private var maxIso: Int = 3200
     private var minExpNs: Long = 100_000L
     private var maxExpNs: Long = 32_000_000_000L
+    private var minAeCompensation: Int = -24
+    private var maxAeCompensation: Int = 12
+    // -8 steps * (1/6 EV) = -1.33 EV daylight compensation to prevent blown-out windows
+    private val daylightAeCompensation: Int
+        get() = (-8).coerceIn(minAeCompensation, maxAeCompensation)
 
     @Volatile
     private var latestMeteringLuma: Double = 80.0
@@ -82,7 +87,11 @@ class TimelapseCameraEngine(private val context: Context) {
             minExpNs = range.lower
             maxExpNs = range.upper
         }
-        Log.i(TAG, "Sensor ranges: ISO [$minIso..$maxIso], Exposure [${minExpNs}ns..${maxExpNs}ns]")
+        chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)?.let { range ->
+            minAeCompensation = range.lower
+            maxAeCompensation = range.upper
+        }
+        Log.i(TAG, "Sensor ranges: ISO [$minIso..$maxIso], Exposure [${minExpNs}ns..${maxExpNs}ns], AE Comp [$minAeCompensation..$maxAeCompensation]")
     }
 
     fun start() {
@@ -357,6 +366,7 @@ class TimelapseCameraEngine(private val context: Context) {
                 addTarget(mReader.surface)
                 set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                 set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, daylightAeCompensation)
                 set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
                 set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             }
@@ -656,6 +666,7 @@ class TimelapseCameraEngine(private val context: Context) {
                     set(CaptureRequest.CONTROL_AWB_LOCK, true)
                 } else {
                     set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, daylightAeCompensation)
                 }
             }
 
