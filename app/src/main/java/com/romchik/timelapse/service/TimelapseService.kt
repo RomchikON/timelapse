@@ -151,6 +151,13 @@ class TimelapseService : Service() {
             StorageHelper.generateSessionId()
         }
 
+        // Resume numbering after any frames already in this session folder (e.g. after an app update
+        // or restart), so existing frames are never overwritten and the video stays chronological.
+        frameCount = StorageHelper.getSessionDir(currentSessionId!!)
+            .listFiles { f -> f.isFile && f.name.startsWith("frame_") && f.name.endsWith(".jpg") }
+            ?.mapNotNull { f -> f.name.removePrefix("frame_").removeSuffix(".jpg").toIntOrNull() }
+            ?.maxOrNull()?.plus(1) ?: 0
+
         currentState = STATE_RECORDING
         isRecordingActive = true
 

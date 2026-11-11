@@ -43,6 +43,12 @@ class TimelapseCameraEngine(private val context: Context) {
     @Volatile
     private var smoothedTargetEv: Double = 0.0
 
+    // Night EV stabilizer state (log domain), see stabilizeNightEv()
+    private val recentNightLogEv = ArrayList<Double>()
+    private var smoothedLogEv: Double = Double.NaN
+    private var appliedLogEv: Double = Double.NaN
+    private var evAdjusting: Boolean = false
+
     @Volatile
     private var smoothedFocusDistance: Float = -1.0f
 
@@ -398,6 +404,47 @@ class TimelapseCameraEngine(private val context: Context) {
         }
     }
 
+    private fun resetNightEvFilter() {
+        recentNightLogEv.clear()
+        smoothedLogEv = Double.NaN
+        appliedLogEv = Double.NaN
+        evAdjusting = false
+    }
+
+    /**
+     * Stabilizes the night exposure value (ISO * exposure time) across frames, all in the log domain:
+     * 1. Median of the last [NIGHT_EV_WINDOW] estimates rejects single-frame noise outliers.
+     * 2. A real, persistent change larger than [NIGHT_EV_RESET_LN] (e.g. room light on/off) is adopted at once.
+     * 3. Otherwise slow EMA smoothing (faster for medium deviations such as a lamp or dusk).
+     * 4. Dead-band: the applied EV only moves when the smoothed value drifts further than
+     *    [NIGHT_EV_DEADBAND_LN]; it then glides at most [NIGHT_EV_MAX_STEP_LN] per frame until it catches up,
+     *    so there are no visible brightness steps between adjacent frames.
+     */
+    private fun stabilizeNightEv(rawEv: Double): Double {
+        recentNightLogEv.add(Math.log(rawEv))
+        if (recentNightLogEv.size > NIGHT_EV_WINDOW) recentNightLogEv.removeAt(0)
+        val median = recentNightLogEv.sorted()[recentNightLogEv.size / 2]
+
+        if (smoothedLogEv.isNaN() || Math.abs(median - smoothedLogEv) > NIGHT_EV_RESET_LN) {
+            smoothedLogEv = median
+            appliedLogEv = median
+            evAdjusting = false
+            return Math.exp(median)
+        }
+
+        val deviation = Math.abs(median - smoothedLogEv)
+        val alpha = if (deviation < 0.5) 0.04 else 0.25
+        smoothedLogEv += alpha * (median - smoothedLogEv)
+
+        val gap = smoothedLogEv - appliedLogEv
+        if (!evAdjusting && Math.abs(gap) > NIGHT_EV_DEADBAND_LN) evAdjusting = true
+        if (evAdjusting) {
+            appliedLogEv += gap.coerceIn(-NIGHT_EV_MAX_STEP_LN, NIGHT_EV_MAX_STEP_LN)
+            if (Math.abs(smoothedLogEv - appliedLogEv) < 0.03) evAdjusting = false
+        }
+        return Math.exp(appliedLogEv)
+    }
+
     private fun calculateSmartExposure(
         autoIso: Int,
         autoExpNs: Long,
@@ -429,6 +476,8 @@ class TimelapseCameraEngine(private val context: Context) {
             aeState != CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED)
 
         if (isBrightScene) {
+            // Daylight AUTO: drop night filter state so the next night starts from a fresh estimate
+            if (!isPreview) resetNightEvFilter()
             return ExposureDecision(
                 useManual = false,
                 iso = autoIso.coerceIn(minIso, maxIso),
@@ -450,17 +499,10 @@ class TimelapseCameraEngine(private val context: Context) {
         val measuredEv = autoIso.toDouble() * autoExpNs.toDouble()
         val rawTargetEv = measuredEv * lumaBoost
 
-        // Anti-flicker Exponential Moving Average smoothing (EMA):
-        // Prevents small lighting jitters from bouncing exposure back and forth between adjacent frames.
-        // If light changed drastically (e.g. room light switched on/off > 3.0x), adapt immediately.
-        val targetEv = if (smoothedTargetEv <= 0.0 || Math.abs(Math.log(rawTargetEv / smoothedTargetEv)) > 1.1) {
-            smoothedTargetEv = rawTargetEv
-            rawTargetEv
-        } else {
-            val smoothed = smoothedTargetEv * 0.85 + rawTargetEv * 0.15
-            smoothedTargetEv = smoothed
-            smoothed
-        }
+        // Night anti-flicker: the dark metering preview is very noisy, so the raw EV estimate jitters
+        // from frame to frame. Median filter + slow smoothing + dead-band + slew-rate limit keep the
+        // applied exposure steady on a static scene. Previews bypass the filter (no state pollution).
+        val targetEv = if (isPreview) rawTargetEv else stabilizeNightEv(rawTargetEv)
 
         // 4. In night/dim scene, prioritize keeping shutter fast (under ~1.8s) by scaling ISO up to 800
         val targetExpNs = 1_800_000_000L.coerceAtMost(adaptiveMaxExpNs)
@@ -715,5 +757,11 @@ class TimelapseCameraEngine(private val context: Context) {
     companion object {
         private const val TAG = "TimelapseCameraEngine"
         private const val PREFERRED_ISO_CAP = 800
+
+        // Night EV stabilizer tuning (natural-log units: 0.69 = x2 brightness, 0.10 = ~10%)
+        private const val NIGHT_EV_WINDOW = 5
+        private const val NIGHT_EV_RESET_LN = 1.1        // >3x change = real light switch, adopt at once
+        private const val NIGHT_EV_DEADBAND_LN = 0.12    // ignore drifts under ~12%
+        private const val NIGHT_EV_MAX_STEP_LN = 0.05    // glide at most ~5% per frame
     }
 }
