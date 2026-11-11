@@ -46,6 +46,9 @@ class TimelapseCameraEngine(private val context: Context) {
     private var latestMeteringLuma: Double = 80.0
 
     @Volatile
+    private var latestBrightRatio: Double = 0.0
+
+    @Volatile
     private var smoothedTargetEv: Double = 0.0
 
     // Night EV stabilizer state (log domain), see stabilizeNightEv()
@@ -140,7 +143,9 @@ class TimelapseCameraEngine(private val context: Context) {
                     }
                     if (img != null) {
                         try {
-                            latestMeteringLuma = computeYuvLuma(img)
+                            val stats = computeYuvStats(img)
+                            latestMeteringLuma = stats.meanLuma
+                            latestBrightRatio = stats.brightRatio
                         } catch (e: Exception) {
                             // Ignore
                         } finally {
@@ -299,12 +304,13 @@ class TimelapseCameraEngine(private val context: Context) {
                 // Ignore
             }
 
-            // In total darkness, if AE is still searching (0) and hasn't ramped up, default to sensor max sensitivity
-            if (lastAeState == CameraMetadata.CONTROL_AE_STATE_SEARCHING || lastAeState == CameraMetadata.CONTROL_AE_STATE_INACTIVE) {
-                if (measuredIso <= 400 && latestMeteringLuma < 15.0) {
-                    measuredIso = 3200
-                    measuredExpNs = 74_000_000L
-                }
+            // In deep darkness where AE preview is still searching and didn't finish ramping up,
+            // ensure a baseline floor without a discrete 8x jump that could trip the stabilizer
+            val rawPreviewEv = measuredIso.toDouble() * measuredExpNs.toDouble()
+            val effectivePreviewEv = if (latestMeteringLuma < 15.0 && rawPreviewEv < 30_000_000_000.0) {
+                30_000_000_000.0 // Smooth baseline (~ISO 500 @ 60ms)
+            } else {
+                rawPreviewEv
             }
 
             val userExpMode = StorageHelper.getExposureMode()
@@ -326,11 +332,14 @@ class TimelapseCameraEngine(private val context: Context) {
                 )
             } else {
                 val currentLuma = latestMeteringLuma
+                val currentBrightRatio = latestBrightRatio
                 calculateSmartExposure(
                     autoIso = measuredIso,
                     autoExpNs = measuredExpNs,
+                    previewEv = effectivePreviewEv,
                     aeState = lastAeState,
                     liveLuma = currentLuma,
+                    brightRatio = currentBrightRatio,
                     intervalSec = intervalSec,
                     isPreview = isPreview,
                     maxExposureCapSec = maxExposureCapSec
@@ -339,9 +348,12 @@ class TimelapseCameraEngine(private val context: Context) {
 
             Log.i(
                 TAG,
-                "Metering [ISO=$measuredIso, Exp=${measuredExpNs / 1_000_000}ms, Luma=${String.format("%.1f", latestMeteringLuma)}, AE=$lastAeState] -> " +
+                "Metering [ISO=$measuredIso, Exp=${measuredExpNs / 1_000_000}ms, Luma=${String.format("%.1f", latestMeteringLuma)}, Bright=${String.format("%.2f", latestBrightRatio)}, AE=$lastAeState] -> " +
                     "Decision [Mode=${decision.modeName}, ISO=${decision.iso}, Exp=${decision.exposureNs / 1_000_000}ms]"
             )
+
+            // Target focus distance: use smoothed distance or a calibrated indoor hyperfocal default (0.65 diopters ~1.54m)
+            val focusDist = if (smoothedFocusDistance >= 0f) smoothedFocusDistance else 0.65f
 
             // Wait briefly for repeating pipeline to drain before firing still capture
             handler.postDelayed({
@@ -352,7 +364,7 @@ class TimelapseCameraEngine(private val context: Context) {
                     handler = handler,
                     targetFile = targetFile,
                     decision = decision,
-                    targetFocusDist = if (smoothedFocusDistance >= 0f) smoothedFocusDistance else null,
+                    targetFocusDist = focusDist,
                     onComplete = onComplete
                 )
             }, 80L)
@@ -382,13 +394,19 @@ class TimelapseCameraEngine(private val context: Context) {
                         result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { measuredIso = it }
                         result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { measuredExpNs = it }
                         result.get(CaptureResult.CONTROL_AE_STATE)?.let { lastAeState = it }
+
+                        // Focus hunting protection in the dark:
+                        // Only update smoothed focus distance when there is adequate light and AF confirmed a solid lock
+                        val afState = result.get(CaptureResult.CONTROL_AF_STATE)
+                        val afLocked = (afState == CameraMetadata.CONTROL_AF_STATE_PASSIVE_FOCUSED ||
+                            afState == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED)
                         result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { dist ->
-                            if (dist >= 0f) {
-                                // Smooth focus distance using EMA filter (80% previous, 20% current)
+                            if (dist >= 0f && latestMeteringLuma >= 22.0 && afLocked) {
+                                // Smooth focus distance using EMA filter (85% previous, 15% current)
                                 smoothedFocusDistance = if (smoothedFocusDistance < 0f) {
                                     dist
                                 } else {
-                                    smoothedFocusDistance * 0.80f + dist * 0.20f
+                                    smoothedFocusDistance * 0.85f + dist * 0.15f
                                 }
                             }
                         }
@@ -418,6 +436,15 @@ class TimelapseCameraEngine(private val context: Context) {
         recentNightLogEv.clear()
         smoothedLogEv = Double.NaN
         appliedLogEv = Double.NaN
+        evAdjusting = false
+    }
+
+    private fun seedNightEvFilter(dayEv: Double) {
+        val logEv = Math.log(dayEv.coerceAtLeast(1e8))
+        recentNightLogEv.clear()
+        recentNightLogEv.add(logEv)
+        smoothedLogEv = logEv
+        appliedLogEv = logEv
         evAdjusting = false
     }
 
@@ -458,8 +485,10 @@ class TimelapseCameraEngine(private val context: Context) {
     private fun calculateSmartExposure(
         autoIso: Int,
         autoExpNs: Long,
+        previewEv: Double,
         aeState: Int,
         liveLuma: Double,
+        brightRatio: Double,
         intervalSec: Int,
         isPreview: Boolean,
         maxExposureCapSec: Double? = null
@@ -484,13 +513,12 @@ class TimelapseCameraEngine(private val context: Context) {
         // When preview metering converges to a fast shutter (<= 35ms / ~1/28s) OR low ISO with reasonable EV,
         // the scene has ample daylight. Hardware AE with daylightAeCompensation (-1.33 EV) perfectly
         // protects window highlights from blowing out, eliminates motion blur, and tracks daylight smoothly.
-        val previewEv = autoIso.toDouble() * autoExpNs.toDouble()
         val isDaylight = (autoExpNs <= 35_000_000L && autoIso <= 800) ||
             (previewEv <= 25_000_000_000.0 && autoIso <= 500)
 
         if (isDaylight) {
-            // Daylight AUTO: drop night filter state so the next night starts from a fresh estimate
-            if (!isPreview) resetNightEvFilter()
+            // Seed the night filter with current daytime EV so sunset starts smoothly without jumps
+            if (!isPreview) seedNightEvFilter(previewEv)
             return ExposureDecision(
                 useManual = false,
                 iso = autoIso.coerceIn(minIso, maxIso),
@@ -502,9 +530,17 @@ class TimelapseCameraEngine(private val context: Context) {
         // 3. Evening / Night scene: calculate total light energy required
         // Account for YUV black level pedestal (~6.0)
         val effectiveLuma = (liveLuma - 6.0).coerceAtLeast(2.0)
-        val targetEffectiveLuma = 68.0 // Target comfortable indoor/night brightness (~74 raw luma)
-        val lumaBoost = if (effectiveLuma < targetEffectiveLuma) {
-            (targetEffectiveLuma / effectiveLuma).coerceIn(1.0, 20.0)
+
+        // Highlight protection: if bright lights (lamp, monitor, window) occupy > 2% of frame,
+        // dynamically lower target luma to prevent blowing them out.
+        val baseTargetLuma = if (brightRatio > 0.02) {
+            (66.0 - (brightRatio * 180.0)).coerceIn(48.0, 66.0)
+        } else {
+            66.0
+        }
+        val maxBoost = if (brightRatio > 0.03) 4.5 else 20.0
+        val lumaBoost = if (effectiveLuma < baseTargetLuma) {
+            (baseTargetLuma / effectiveLuma).coerceIn(1.0, maxBoost)
         } else {
             1.0
         }
@@ -670,10 +706,22 @@ class TimelapseCameraEngine(private val context: Context) {
                     set(CaptureRequest.SENSOR_SENSITIVITY, decision.iso)
                     set(CaptureRequest.SENSOR_EXPOSURE_TIME, decision.exposureNs)
                     set(CaptureRequest.SENSOR_FRAME_DURATION, decision.exposureNs)
-                    set(CaptureRequest.CONTROL_AWB_LOCK, true)
+
+                    // Never freeze an unconverged dark preview AWB.
+                    // In deep darkness (ISO >= 1600 or dark luma), using DAYLIGHT preset balances
+                    // the red/blue channel gains against dark-current thermal leakage on Samsung GW1,
+                    // eliminating the purple/magenta tint. Otherwise let AWB run unlocked.
+                    if (decision.iso >= 1600 || latestMeteringLuma < 18.0) {
+                        set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT)
+                    } else {
+                        set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+                    }
+                    set(CaptureRequest.CONTROL_AWB_LOCK, false)
                 } else {
                     set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
                     set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, daylightAeCompensation)
+                    set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+                    set(CaptureRequest.CONTROL_AWB_LOCK, false)
                 }
             }
 
@@ -703,7 +751,12 @@ class TimelapseCameraEngine(private val context: Context) {
         }
     }
 
-    private fun computeYuvLuma(image: Image): Double {
+    private data class YuvMeteringStats(
+        val meanLuma: Double,
+        val brightRatio: Double
+    )
+
+    private fun computeYuvStats(image: Image): YuvMeteringStats {
         val plane = image.planes[0]
         val buffer = plane.buffer
         val rowStride = plane.rowStride
@@ -711,6 +764,7 @@ class TimelapseCameraEngine(private val context: Context) {
         val width = image.width
         val height = image.height
         var sum = 0L
+        var brightCount = 0
         var count = 0
         var y = 0
         while (y < height) {
@@ -719,14 +773,18 @@ class TimelapseCameraEngine(private val context: Context) {
             while (x < width) {
                 val idx = rowOffset + x * pixelStride
                 if (idx >= 0 && idx < buffer.limit()) {
-                    sum += (buffer.get(idx).toInt() and 0xFF)
+                    val luma = buffer.get(idx).toInt() and 0xFF
+                    sum += luma
+                    if (luma >= 210) brightCount++
                     count++
                 }
                 x += 8
             }
             y += 8
         }
-        return if (count > 0) sum.toDouble() / count.toDouble() else 0.0
+        val mean = if (count > 0) sum.toDouble() / count.toDouble() else 0.0
+        val ratio = if (count > 0) brightCount.toDouble() / count.toDouble() else 0.0
+        return YuvMeteringStats(mean, ratio)
     }
 
     private fun computeJpegLuma(jpegBytes: ByteArray): Int {
@@ -777,8 +835,8 @@ class TimelapseCameraEngine(private val context: Context) {
         private const val PREFERRED_ISO_CAP = 800
 
         // Night EV stabilizer tuning (natural-log units: 0.69 = x2 brightness, 0.10 = ~10%)
-        private const val NIGHT_EV_WINDOW = 5
-        private const val NIGHT_EV_RESET_LN = 1.1        // >3x change = real light switch, adopt at once
+        private const val NIGHT_EV_WINDOW = 9
+        private const val NIGHT_EV_RESET_LN = 1.8        // ~6x change = real light switch, adopt at once
         private const val NIGHT_EV_DEADBAND_LN = 0.12    // ignore drifts under ~12%
         private const val NIGHT_EV_MAX_STEP_LN = 0.05    // glide at most ~5% per frame
     }
