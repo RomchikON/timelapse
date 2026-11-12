@@ -99,18 +99,21 @@ object StorageHelper {
         return SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
     }
 
+    private const val DEFAULT_ROOM_FOCUS_DIST = 0.33f
+
     fun getSavedFocusDistance(): Float {
         return try {
             val status = readStatus()
-            val saved = status?.optDouble("saved_focus_dist", 0.65) ?: 0.65
-            saved.toFloat().coerceIn(0.25f, 1.50f)
+            val saved = status?.optDouble("saved_focus_dist", DEFAULT_ROOM_FOCUS_DIST.toDouble())
+                ?: DEFAULT_ROOM_FOCUS_DIST.toDouble()
+            saved.toFloat().coerceIn(0.15f, 1.00f)
         } catch (e: Exception) {
-            0.65f
+            DEFAULT_ROOM_FOCUS_DIST
         }
     }
 
     fun saveFocusDistance(dist: Float) {
-        if (dist < 0.25f || dist > 1.50f) return
+        if (dist < 0.15f || dist > 1.00f) return
         try {
             val existing = readStatus() ?: JSONObject()
             existing.put("saved_focus_dist", dist.toDouble())
@@ -155,6 +158,7 @@ object StorageHelper {
     ) {
         try {
             val meta = lastCaptureMeta
+            val savedFocus = getSavedFocusDistance()
             val json = JSONObject().apply {
                 put("state", state)
                 put("session_id", sessionId ?: "")
@@ -172,6 +176,7 @@ object StorageHelper {
                 put("scheduled_start", scheduledStart ?: "")
                 put("scheduled_end", scheduledEnd ?: "")
                 put("user_exposure_mode", getExposureMode())
+                put("saved_focus_dist", savedFocus.toDouble())
                 put("last_iso", meta.iso)
                 put("last_exposure_ns", meta.exposureNs)
                 put("last_exposure_str", meta.exposureFormatted)
